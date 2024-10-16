@@ -1,0 +1,4892 @@
+---
+title: "NetherlandsAnalysis"
+author: "Kai Trepka"
+date: "2024-10-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+This is a notebook for carrying out sequencing analysis of the Netherlands clinical study. 
+
+## Setup
+```{r}
+library(dplyr) # tidy data
+library(ggplot2) # plotting
+library(ggpubr) # pretty plotting
+library(readxl) # read metadata excel sheet
+library(vegan) # alpha diversity calculations
+library(ape) # tree loading
+library(ggtree) # tree plotting
+library(Boruta) # ML feature selection
+library(randomForest) # RF models
+library(caret) # LOOCV
+library(pROC) # ROC
+library(ROCR) # prediction
+library(reshape2) # melt
+
+tabledir <- "/mnt/tank/labmainshare/qb3share/ktrepka/NetherlandsStudy/TablesGitHub/"
+savedir <- "/mnt/tank/labmainshare/qb3share/ktrepka/NetherlandsStudy/FiguresGitHub/"
+suppressWarnings(dir.create(paste0(tabledir, "Models/"))) # create model directory
+
+# Metadata
+fn <- paste0(tabledir, "Metadata/NEMetadata.csv")
+metadata <- read.csv(fn)
+
+# Colorscales
+enriched_palette <- c("Enriched" = "blue", "Depleted" = "orange", "Not Significant (FDR > 0.2)" = "gray", "FDR > 0.2" = "gray", "Not Significant" = "gray")
+yes_palette <- c("Yes" = "#FF000080", "No" = "black")
+tox_sig_palette <- c("FDR < 0.2" = "#FF000080", "FDR > 0.2" = "gray")
+```
+
+## Helper functions
+```{r}
+# Function for geometric mean
+geometric_mean <- function(x) {
+  exp(mean(log(x)))
+}
+
+# Function for CLR transform
+clr_transform <- function(matrix) {
+  matrix[matrix == 0] <- min(matrix[matrix > 0])/2 # Replace zeros with half-minimum non-zero value
+  gmean <- apply(matrix, 2, geometric_mean)
+  log_matrix <- log(matrix)
+  clr_matrix <- sweep(log_matrix, 2, log(gmean), "-")
+  return(clr_matrix)
+}
+```
+
+# Metadata analysis
+
+## Dose per patient over time - mg/m2
+```{r}
+met <- metadata %>% select(Patient_ID, Dose_T1, Dose_T2, Dose_T3) %>% 
+  reshape2::melt(id.var = "Patient_ID")
+colnames(met) <- c("Patient", "Cycle", "Dose")
+met$Cycle <- case_when(met$Cycle == "Dose_T1" ~ "1",
+                           met$Cycle == "Dose_T2" ~ "2", 
+                           TRUE ~ "3")
+# Remove NA
+met <- na.omit(met)
+
+p <- ggplot(met, aes(x = Cycle, y = Dose)) + 
+  facet_wrap(~Patient, scales = "free_y") + 
+  geom_point() +
+  geom_line(aes(group = Patient)) + 
+  theme_pubr() + 
+  ylab("Dose (mg/m2)")+ 
+  scale_y_continuous(breaks= scales::breaks_pretty())
+```
+
+## Dose per patient over time - mg
+```{r}
+met <- metadata %>% select(Patient_ID, Dose_T1_mg, Dose_T2_mg, Dose_T3_mg) %>% 
+  reshape2::melt(id.var = "Patient_ID")
+colnames(met) <- c("Patient", "Cycle", "Dose")
+met$Cycle <- case_when(met$Cycle == "Dose_T1_mg" ~ "1",
+                           met$Cycle == "Dose_T2_mg" ~ "2", 
+                           TRUE ~ "3")
+# Remove NA
+met <- na.omit(met)
+
+p <- ggplot(met, aes(x = Cycle, y = Dose)) + 
+  facet_wrap(~Patient, scales = "free_y") + 
+  geom_point() +
+  geom_line(aes(group = Patient)) + 
+  theme_pubr() + 
+  ylab("Dose (mg/m2)")+ 
+  scale_y_continuous(breaks= scales::breaks_pretty())
+```
+
+## Total dose vs toxicity
+```{r}
+tox_cat = "DoseReduction_T2"
+df <- metadata
+df$Tox <- df[[tox_cat]]
+df <- df %>% filter(!(is.na(Tox))) %>% filter(Tox != 5555) %>% filter(Tox != 9999)
+df$Tox <- case_when(df$Tox > 0 ~ "Yes", 
+                    TRUE ~ "No")
+df <- df %>% filter(Time == "Baseline")
+
+p <- ggplot(df, aes(y = Dose_T1, x = Tox)) + 
+  geom_boxplot(outlier.size = -1) + 
+  geom_point() + 
+  theme_pubr() + 
+  xlab("Dose reduction for Cycle 2") + 
+  ylab("Starting dose (mg/m2)") +
+  stat_compare_means()
+
+# Also histogram
+p1 <- ggplot(df, aes(x = Dose_T1)) + 
+  geom_histogram(bins = 22) + 
+  theme_pubr() + 
+  xlab("Cycle 1 dose (mg/m2)") + 
+  xlim(500, 2600)
+
+p2 <- ggplot(df, aes(x = Dose_T2)) + 
+  geom_histogram(bins = 22) + 
+  theme_pubr() + 
+  xlab("Cycle 2 dose (mg/m2)") + 
+  xlim(500, 2600)
+
+p3 <- ggplot(df, aes(x = Dose_T3)) + 
+  geom_histogram(bins = 22) + 
+  theme_pubr() + 
+  xlab("Cycle 3 dose (mg/m2)") + 
+  xlim(500, 2600)
+
+p <- ggarrange(p, p1, p2, p3, nrow = 1)
+```
+
+## Total dose vs toxicity - mg
+```{r}
+tox_cat = "DoseReduction_T2"
+df <- metadata
+df$Tox <- df[[tox_cat]]
+df <- df %>% filter(!(is.na(Tox))) %>% filter(Tox != 5555) %>% filter(Tox != 9999)
+df$Tox <- case_when(df$Tox > 0 ~ "Yes", 
+                    TRUE ~ "No")
+df <- df %>% filter(Time == "Baseline")
+
+p <- ggplot(df, aes(y = Dose_T1_mg, x = Tox)) + 
+  geom_boxplot(outlier.size = -1) + 
+  geom_point() + 
+  theme_pubr() + 
+  xlab("Dose reduction for Cycle 2") + 
+  ylab("Starting dose (mg)") +
+  stat_compare_means()
+
+# Also histogram
+p1 <- ggplot(df, aes(x = Dose_T1_mg)) + 
+  geom_histogram(bins = 50) + 
+  theme_pubr() + 
+  xlab("Cycle 1 dose (mg)") + 
+  xlim(500, 6500)
+
+p2 <- ggplot(df, aes(x = Dose_T2_mg)) + 
+  geom_histogram(bins = 50) + 
+  theme_pubr() + 
+  xlab("Cycle 2 dose (mg)") + 
+  xlim(500, 6500)
+
+p3 <- ggplot(df, aes(x = Dose_T3_mg)) + 
+  geom_histogram(bins = 50) + 
+  theme_pubr() + 
+  xlab("Cycle 3 dose (mg)") + 
+  xlim(500, 6500)
+
+p <- ggarrange(p, p1, p2, p3, nrow = 1)
+```
+
+# Microbiota differences by timepoint
+```{r}
+figdir <- paste0(savedir, "Timepoint/")
+dir.create(figdir)
+```
+
+## Composition
+```{r}
+timegroup = "Cycle 3"
+taxLevel = "Species"
+
+fn <- paste0(tabledir, "TaxaDE/", taxLevel, "Groups.csv")
+v <- read.csv(fn)
+
+# Set the FDR cutoff value
+fdr_cutoff <- 0.2
+
+# Count number altered
+num <- v %>% filter(FDR < fdr_cutoff) %>% select(Taxa) %>% count()
+num_up <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value > 0) %>% select(Taxa) %>% count()
+x_up <- v %>% filter(Value > 0) %>% select(Value) %>% pull() %>% max()/2
+num_down <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value < 0) %>% select(Taxa) %>% count()
+x_down <- v %>% filter(Value < 0) %>% select(Value) %>% pull() %>% min()/2
+ymin <- v %>% select(FDR) %>% pull() %>% min(); yval <- -log10(ymin/4); ylim <- -log10(ymin/4)
+
+# Create a volcano plot
+v$Value <- log2(exp(v$Value)) # convert to log2FC
+v$TaxLevel <- taxLevel
+v <- v %>% filter(Group == timegroup)
+p <- ggplot(data = v, aes(x = Value, y = -log10(p.value))) +
+  geom_point(aes(color = ifelse(FDR <= fdr_cutoff, ifelse(Value > 0, "Enriched", "Depleted"), "FDR > 0.2")), size = 1.5, alpha = 1) +
+  theme_pubr() +
+  facet_wrap(~TaxLevel) +
+  scale_color_manual(values = enriched_palette) +
+  theme(legend.position = "top") +
+  theme(legend.title=element_blank())
+
+if (timegroup == "Trough"){
+  p <- p + labs(x = "Post/Baseline (log2FC)", y = expression("Significance (-log"[10]*"(p))"), color = "Significance") 
+} else {
+  p <- p + labs(x = "Cycle 3/Baseline (log2FC)", y = expression("Significance (-log"[10]*"(p))"), color = "Significance") 
+}
+
+# Save
+fn <- paste0(figdir, "Volcano", taxLevel, timegroup, ".pdf")
+ggsave(filename = fn, plot = p, width = 3.5, height = 3)
+```
+
+## Composition hits heatmap
+```{r}
+timegroup = "Cycle 3" # "Trough" or "Cycle 3"
+taxLevel = "Species"
+
+# Load hits
+fn <- paste0(tabledir, "TaxaDE/", taxLevel, "Groups.csv")
+v <- read.csv(fn)
+fdr_cutoff <- 0.2
+v <- v %>% filter(Group == timegroup)
+hits <- v %>% filter(FDR < fdr_cutoff) %>% select(Taxa) %>% pull()
+
+# Load data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+t <- read.csv(fn) %>% filter(Taxa %in% hits)
+df <- reshape2::melt(t, id = "Taxa")
+colnames(df) <- c("Taxa", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Extract species
+df_plot$Taxa <- gsub(".*s__", "", df_plot$Taxa)
+df_plot$Taxa <- gsub("_", " ", df_plot$Taxa)
+
+# Explore more efficient plotting
+d <- df_plot %>% as.data.frame()
+d$Pathway <- d$Taxa
+d$PtPathway <- paste0(d$Patient_ID, d$Pathway)
+pt_bl_c3 <- d %>% 
+  filter(Time %in% c("Baseline", "Cycle 3")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_c3 <- d %>% filter(Time %in% c("Baseline", "Cycle 3")) %>% filter(PtPathway %in% pt_bl_c3) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+fc_c3$Time = "Cycle 3"
+pt_bl_trough <- d %>% 
+  filter(Time %in% c("Baseline", "Trough")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_trough <- d %>%filter(Time %in% c("Baseline", "Trough")) %>% filter(PtPathway %in% pt_bl_trough) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+fc_trough$Time = "Trough"
+
+fc <- rbind(fc_c3, fc_trough)
+
+# Sort
+pt_order <- fc %>% group_by(Patient_ID) %>% dplyr::summarise(mu = sum(abs(log2FC))) %>%
+  arrange(mu) %>% select(Patient_ID) %>% pull()
+fc$Patient_ID <- factor(fc$Patient_ID, levels = rev(pt_order))
+
+pathway_order <- fc %>% group_by(Pathway) %>% dplyr::summarise(mu = sum(log2FC)) %>%
+  arrange(mu) %>% select(Pathway) %>% pull()
+fc$Pathway <- factor(fc$Pathway, levels = pathway_order) # order pathways
+
+# Filter to trough only
+fc <- fc %>% filter(Time == timegroup)
+
+# Cluster!
+df_wide <- fc %>% select(-Time) %>% 
+  tidyr::pivot_wider(names_from = Patient_ID, values_from = log2FC) %>%
+  as.data.frame()
+rownames(df_wide) <- df_wide$Pathway; df_wide <- df_wide %>% select(-Pathway)
+df_wide[is.na(df_wide)] <- 0 # set NA to 0
+
+# Heatmap with ggplot2
+# Convert to matrix if it's not already
+df_matrix <- as.matrix(df_wide)
+
+# Perform hierarchical clustering on rows and columns
+row_clusters <- hclust(dist(df_matrix, method = "euclidean"), method = "mcquitty")
+col_clusters <- hclust(dist(t(df_matrix), method = "euclidean"), method = "mcquitty")
+
+# Order the matrix according to the clustering
+ordered_matrix <- df_matrix[rev(row_clusters$order), rev(col_clusters$order)]
+
+# Melt the ordered matrix for ggplot2
+df_long <- reshape2::melt(ordered_matrix)
+colnames(df_long) <- c("Taxa", "Patient_ID", "log2FC")
+
+# Plot using ggplot2
+plotlimits = 6.5
+df_long$`log2FC/Baseline` <- df_long$log2FC
+p <- ggplot(df_long, aes(x = Patient_ID, y = Taxa, fill = `log2FC/Baseline`)) +
+  geom_tile() +
+  scale_fill_gradientn(
+    colors = c("orange", "white", "blue"),
+    values = scales::rescale(c(-plotlimits, 0, plotlimits)),
+    limits = c(-plotlimits, plotlimits),
+    oob = scales::squish
+  ) +
+  xlab("Patient") + 
+  ylab("Species") + 
+  theme_pubr() +
+  theme(axis.text.x = element_blank()) + 
+  theme(axis.text.y = element_text(face = "italic"))
+
+fn <- paste0(figdir, "SpeciesHeatmap", timegroup, ".pdf")
+if (timegroup == "Trough"){
+  ggsave(filename = fn, plot = p, height = 3, width = 6)
+} else {
+  ggsave(filename = fn, plot = p, height = 2, width = 6)
+}
+```
+
+## Hit tree
+```{r}
+taxLevel = "Species"
+
+# Load hits
+fn <- paste0(tabledir, "TaxaDE/", taxLevel, "Groups.csv")
+v <- read.csv(fn) %>% filter(Group == "Trough")
+fdr_cutoff <- 0.2
+hits <- v %>% filter(FDR < fdr_cutoff) %>% select(Taxa) %>% pull()
+dir <- v %>% filter(FDR < fdr_cutoff) %>% select(Value) %>% pull()
+dir <- case_when(dir < 0 ~ "Depleted",
+                 TRUE ~ "Enriched")
+hits_s <- gsub(".*s__", "", hits)
+
+# Load mapping file
+fn <- "/mnt/tank/labmainshare/qb3share/shared_resources/databases/Metaphlan4_Tree/mpa_vJan21_CHOCOPhlAnSGB_202103_species.txt"
+file <- read.csv(fn, sep = "\t", header = FALSE) %>% as.data.frame()
+map = file$V2; names(map) = gsub("SGB", "", file$V1)
+mapped_vals <- list()
+for (i in 1:length(hits_s)){
+  hit <- hits_s[i]
+  new_name <- names(map[grepl(hit, map)])[1]
+  mapped_vals <- c(mapped_vals, new_name)
+}
+tips_keep = unlist(mapped_vals)
+tips_keep <- gsub("_group", "", tips_keep) # fix "_group" label
+
+# Tip map df
+tip_map <- data.frame("number" = tips_keep, "hit" = hits_s, "direction" = dir)
+rownames(tip_map) = tip_map$number
+
+# Load tree
+treeloc <- "/mnt/tank/labmainshare/qb3share/shared_resources/databases/Metaphlan4_Tree/mpa_vJan21_CHOCOPhlAnSGB_202103.nwk"
+tree <- read.tree(file = treeloc)
+
+# Make sure all tips in tree
+if(sum(tips_keep %in% tree$tip.label) != length(tips_keep)){
+  print("missing tips!")
+}
+
+# prune tree
+tips_to_drop <- setdiff(tree$tip.label, tips_keep)
+tree_sub <- drop.tip(tree, tips_to_drop)
+
+# Add labels
+species_up <- tip_map %>% filter(direction == "Enriched") %>% select(hit) %>% pull()
+species_down <- tip_map %>% filter(direction == "Depleted") %>% select(hit) %>% pull()
+tree_sub$tip.label = tip_map[tree_sub$tip.label, "hit"]
+tree_sub$Change <- case_when(tree_sub$tip.label %in% species_up ~ enriched_palette["Enriched"],
+                         tree_sub$tip.label %in% species_down ~ enriched_palette["Depleted"],
+                         TRUE ~ enriched_palette["Not Significant"])
+p <- ggtree(tree_sub, layout="rectangular") + 
+  geom_tippoint(color=tree_sub$Change, fill = tree_sub$Change, shape = 21, size = 2) +
+  geom_strip('Trueperella_pyogenes', 'Actinomyces_graevenitzii', barsize=1, color=enriched_palette["Depleted"], 
+            label="Actinomycetaceae", offset = -0.5, fontsize = 3.5, offset.text=0.05, angle = 0, hjust = 0) + 
+  geom_strip('Intestinimonas_massiliensis', 'Clostridium_sp_AM22_11AC', barsize=1, color=enriched_palette["Enriched"], 
+            label="Clostridiales", offset = -0.13, fontsize = 3.5, offset.text=0.05, angle = 0, hjust = 0) + 
+  xlim(0, 1.4) + # 0.75
+  geom_treescale(x = 0, y = 8, width = 0.2) 
+
+fn <- paste0(figdir, "Tree.pdf")
+ggsave(plot = p, filename = fn, height=2.9, width=2, device="pdf", useDingbats=F)
+```
+## Taxa correlation early/late
+```{r}
+taxLevel = "Species"
+
+fn <- paste0(tabledir, "TaxaDE/", taxLevel, "Groups.csv")
+v <- read.csv(fn)
+v$Value <- log2(exp(v$Value)) # convert to log2FC
+
+v1 <- v %>% filter(Group == "Cycle 3") %>% select(Value, Taxa) %>% dplyr::rename(ValueT2 = Value)
+v2 <- v %>% filter(Group == "Trough") %>% select(Value, Taxa) %>% dplyr::rename(ValueT3 = Value)
+
+m <- inner_join(v1, v2, by = "Taxa")
+spearman_test <- cor.test(m$ValueT2, m$ValueT3, method = "spearman")
+correlation <- spearman_test$estimate
+p_value <- spearman_test$p.value
+
+p <- ggplot(m, aes(x = ValueT2, y = ValueT3)) + 
+  geom_point(color = "grey") + 
+  geom_smooth(color = "black", method = "lm") + 
+  xlab("Cycle 3/Baseline (log2FC)") + 
+  ylab("Post/Baseline (log2FC)") + 
+  theme_pubr() + 
+  annotate("text", x=0, y=7, label = sprintf("Spearman's rho = %.2f", correlation)) +
+  annotate("text", x=0, y=6, label = paste("italic(p) < 1e-16", flag="#"), parse = TRUE) 
+
+fn <- paste0(figdir, "TaxaCorrelation.pdf")
+ggsave(plot = p, filename = fn, height=3, width=3, device="pdf", useDingbats=F)
+```
+
+## Diversity - evenness
+```{r}
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+
+# Calculate diversity
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Shannon"; df$Sample <- rownames(df)
+df <- left_join(df, metadata, by = "Sample")
+
+# Plot
+p <- ggplot(df, aes(x = Time, y = Shannon)) + 
+  geom_boxplot(aes(fill = Time), alpha = 0.5) + 
+  geom_point(aes(color = Time)) + 
+  ylab("Shannon") + 
+  theme_pubr() + 
+  stat_compare_means(method = "kruskal.test", label.y = 4.8, label.x = 1.3) + 
+  theme(legend.position = "none") + 
+  ylim(1, 5)
+
+# Statistics testing - paired data only
+pt_keep <- df %>% group_by(Patient_ID) %>% dplyr::summarise(n = n()) %>% filter(n == 3) %>% select(Patient_ID) %>% pull() %>% unique()
+df_paired <- df %>% filter(Patient_ID %in% pt_keep) %>% arrange(Patient_ID)
+res_C3 <- wilcox.test(df_paired %>% filter(Time == "Baseline") %>% select(Shannon) %>% pull(), 
+                      df_paired %>% filter(Time == "Cycle 3") %>% select(Shannon) %>% pull(),
+                      paired = TRUE)
+res_Trough <- wilcox.test(df_paired %>% filter(Time == "Baseline") %>% select(Shannon) %>% pull(), 
+                          df_paired %>% filter(Time == "Trough") %>% select(Shannon) %>% pull(), 
+                          paired = TRUE)
+
+# Save
+fn <- paste0(figdir, "Shannon.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Diversity - richness
+```{r}
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+presence_cutoff = 0.01
+
+# Calculate diversity
+div <- colSums(t %>% select(-Taxa) > 0.01)
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Shannon"; df$Sample <- rownames(df)
+df <- left_join(df, metadata, by = "Sample")
+
+# Plot
+p <- ggplot(df, aes(x = Time, y = Shannon)) + 
+  geom_boxplot(aes(fill = Time), alpha = 0.5) + 
+  geom_point(aes(color = Time)) + 
+  ylab("Number of species") + 
+  theme_pubr() + 
+  stat_compare_means(method = "kruskal.test", label.y = 290, label.x = 1.3) + 
+  theme(legend.position = "none") + 
+  ylim(10, 300)
+
+# Statistics testing - paired data only
+pt_keep <- df %>% group_by(Patient_ID) %>% dplyr::summarise(n = n()) %>% filter(n == 3) %>% select(Patient_ID) %>% pull() %>% unique()
+df_paired <- df %>% filter(Patient_ID %in% pt_keep) %>% arrange(Patient_ID)
+res_C3 <- wilcox.test(df_paired %>% filter(Time == "Baseline") %>% select(Shannon) %>% pull(), 
+                      df_paired %>% filter(Time == "Cycle 3") %>% select(Shannon) %>% pull(),
+                      paired = TRUE)
+res_Trough <- wilcox.test(df_paired %>% filter(Time == "Baseline") %>% select(Shannon) %>% pull(), 
+                          df_paired %>% filter(Time == "Trough") %>% select(Shannon) %>% pull(), 
+                          paired = TRUE)
+
+# Save
+fn <- paste0(figdir, "NumSpecies.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Pathways
+```{r}
+timegroup = "Trough" # "Trough" or "Cycle 3"
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+v$Value <- v$log2FC
+v <- v %>% filter(Group == timegroup)
+v$Pathway <- "Pathways"
+label_hits <-  v %>% filter(grepl(" menaquinol", Gene)) %>% select(Gene) %>% pull()
+v$Highlight = case_when(v$Gene %in% label_hits ~ "Yes", TRUE ~ "No")
+
+# Set the FDR cutoff value
+fdr_cutoff <- 0.2
+
+# Count number altered
+num <- v %>% filter(FDR < fdr_cutoff) %>% select(Gene) %>% count()
+num_up <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value > 0) %>% select(Gene) %>% count()
+x_up <- v %>% filter(Value > 0) %>% select(Value) %>% pull() %>% max()/2
+num_down <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value < 0) %>% select(Gene) %>% count()
+x_down <- v %>% filter(Value < 0) %>% select(Value) %>% pull() %>% min()/2
+ymin <- v %>% select(FDR) %>% pull() %>% min(); yval <- -log10(ymin/4); ylim <- -log10(ymin/4)
+
+# Create a volcano plot
+enriched_palette_menaquinol <- c("Enriched (menaquinol)" = "blue", "Enriched (other)" = "#8fa9ef", "Depleted" = "orange", "Not Significant (FDR > 0.2)" = "gray", "FDR > 0.2" = "gray", "Not Significant" = "gray")
+p <- ggplot(data = v, aes(x = Value, y = -log10(p.value))) +
+  geom_point(aes(color = ifelse(FDR <= fdr_cutoff, ifelse(Value > 0, "Enriched", "Depleted"), "FDR > 0.2")), size = 1.5) + 
+  #geom_point(aes(color = ifelse(FDR <= fdr_cutoff, ifelse(Highlight == "Yes", "Enriched (menaquinol)", ifelse(Value > 0, "Enriched (other)", "Depleted")), "FDR > 0.2")), size = 1.5) + 
+  theme_pubr() +
+  #scale_color_manual(values = enriched_palette_menaquinol) +
+  scale_color_manual(values = enriched_palette) +
+  facet_wrap(~Pathway) + 
+  theme(legend.position = "top") + 
+  theme(legend.title=element_blank())
+
+if (timegroup == "Trough"){
+  p <- p + labs(x = "Post/Baseline (log2FC)", y = expression("Significance (-log"[10]*"(p))"), color = "Significance")
+} else {
+  p <- p + labs(x = "Cycle 3/Baseline (log2FC)", y = expression("Significance (-log"[10]*"(p))"), color = "Significance") 
+}
+
+# Save
+fn <- paste0(figdir, "VolcanoPathway", timegroup, ".pdf")
+ggsave(filename = fn, plot = p, width = 3.5, height = 3)
+```
+
+## Pathway correlation early/late
+
+```{r}
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+v$Value <- v$log2FC
+
+v1 <- v %>% filter(Group == "Cycle 3") %>% select(Value, Gene) %>% dplyr::rename(ValueT2 = Value)
+v2 <- v %>% filter(Group == "Trough") %>% select(Value, Gene) %>% dplyr::rename(ValueT3 = Value)
+
+m <- inner_join(v1, v2, by = "Gene")
+spearman_test <- cor.test(m$ValueT2, m$ValueT3, method = "spearman")
+correlation <- spearman_test$estimate
+p_value <- spearman_test$p.value
+
+p <- ggplot(m, aes(x = ValueT2, y = ValueT3)) + 
+  geom_point(color = "grey") + 
+  geom_smooth(color = "black", method = "lm") + 
+  xlab("Cycle 3/Baseline (log2FC)") + 
+  ylab("Post/Baseline (log2FC)") + 
+  theme_pubr() + 
+  annotate("text", x=0, y=7, label = sprintf("Spearman's rho = %.2f", correlation)) +
+  annotate("text", x=0, y=6, label = paste("italic(p) < 1e-16", flag="#"), parse = TRUE) 
+
+fn <- paste0(figdir, "PathwayCorrelation.pdf")
+ggsave(plot = p, filename = fn, height=3, width=3, device="pdf", useDingbats=F)
+```
+
+## Pathway hits - heatmap
+Top hits include many superpathways of menaquinol biosynthesis. menaquinol can protect cells from chemotherapy (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10377396/); menaquinone (vitamin K2) can sensitize cells! (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9611527/)
+
+```{r}
+# Load hits
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+fdr_cutoff <- 0.2
+v <- v %>% filter(!(grepl("UNINTEGRATED|mitochondria", Gene))) # remove global pathways
+hits <- v %>% filter(FDR < fdr_cutoff) %>% head(n = 10) %>% select(Gene) %>% pull() #filter(grepl(" menaquinol|pyrimidine", Gene)) %>% select(Gene) %>% pull()
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+t <- read.csv(fn) %>% filter(Pathway %in% hits)
+df <- reshape2::melt(t, id = "Pathway")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Explore more efficient plotting
+d <- df_plot %>% as.data.frame()
+d$PtPathway <- paste0(d$Patient_ID, d$Pathway)
+pt_bl_c3 <- d %>% 
+  filter(Time %in% c("Baseline", "Cycle 3")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_c3 <- d %>% filter(Time %in% c("Baseline", "Cycle 3")) %>% filter(PtPathway %in% pt_bl_c3) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+fc_c3$Time = "Cycle 3"
+pt_bl_trough <- d %>% 
+  filter(Time %in% c("Baseline", "Trough")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_trough <- d %>%filter(Time %in% c("Baseline", "Trough")) %>% filter(PtPathway %in% pt_bl_trough) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+fc_trough$Time = "Trough"
+
+fc <- rbind(fc_c3, fc_trough)
+
+# Fix names
+fc$Pathway <- gsub("\\&", "", fc$Pathway)
+fc$Pathway <- gsub("\\;", "", fc$Pathway)
+fc$Pathway <- gsub(".*\\: ", "", fc$Pathway)
+
+# Sort
+pt_order <- fc %>% group_by(Patient_ID) %>% dplyr::summarise(mu = sum(log2FC)) %>%
+  arrange(mu) %>% select(Patient_ID) %>% pull()
+fc$Patient_ID <- factor(fc$Patient_ID, levels = rev(pt_order))
+
+pathway_order <- fc %>% group_by(Pathway) %>% dplyr::summarise(mu = sum(log2FC)) %>%
+  arrange(mu) %>% select(Pathway) %>% pull()
+fc$Pathway <- factor(fc$Pathway, levels = pathway_order) # order pathways
+
+# Filter to trough only
+fc <- fc %>% filter(Time == "Trough")
+
+# Plot
+plotlimits = 10
+fc$`Post/Baseline (log2FC)` <- fc$log2FC
+p <- ggplot(fc, aes(x = Patient_ID, y = Pathway, fill = `Post/Baseline (log2FC)`)) +
+  geom_tile() + 
+#  facet_wrap(~Time, scales = "free_x", nrow = 2) + 
+  scale_fill_gradientn(
+    colors = c("orange", "white", "blue"),
+    values = scales::rescale(c(-plotlimits, 0, plotlimits)),
+    limits = c(-plotlimits, plotlimits),
+    oob = scales::squish
+  ) + 
+  theme_pubr() + 
+  ylab("")+ 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  theme(axis.text.x = element_blank()) + 
+  theme(legend.position = "top")
+
+fn <- paste0(figdir, "PathwayHeatmap.pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 9)
+```
+
+## Pathway hits - pyrimidine
+```{r}
+# Load hits
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+fdr_cutoff <- 0.2
+hits <- v %>% filter(FDR < fdr_cutoff) %>% filter(grepl("pyrimidine", Gene)) %>% select(Gene) %>% pull()
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+t <- read.csv(fn) %>% filter(Pathway %in% hits)
+df <- reshape2::melt(t, id = "Pathway")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Remove patients for which the taxa abundance is 0 for the entire timecourse
+df_plot <- df_plot %>%
+  group_by(Pathway, Patient_ID) %>%
+  filter(sum(`Abundance`) > 0) %>%
+  ungroup()
+
+# Plot
+df_plot$Pathway <- gsub(".*\\:", "", df_plot$Pathway)
+df_plot$Pathway <- gsub("superpathway of ", "", df_plot$Pathway)
+p <- ggplot(df_plot, aes(x = Time, y = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Time), alpha = 0.5) + 
+  geom_point(aes(color = Time)) + 
+  ylab("Abundance (%)") + 
+  scale_y_log10() + 
+  facet_wrap(~Pathway, scales = "free_y", ncol = 3) + 
+  theme_pubr() + 
+  theme(strip.text = element_text(face = "italic")) +  # Italicize
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "BarplotsPyrimidine.pdf")
+ggsave(filename = fn, plot = p, width = 12, height = 9)
+```
+
+## Menaquinol KO heatmap
+```{r}
+timegroup = "Trough" # "Trough" or "Cycle 3"
+avg_name = "Average" # name the score
+
+# Set hits
+hits = c(avg_name, "K02552", "K02551", "K08680", "K02549", "K01911", "K01661", "K19222", "K02548", "K03183") 
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% hits) %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Calculate fold-change
+d <- df_plot %>% as.data.frame()
+d$PtPathway <- paste0(d$Patient_ID, d$Pathway)
+pt_bl_c3 <- d %>% 
+  filter(Time %in% c("Baseline", "Cycle 3")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_c3 <- d %>% filter(Time %in% c("Baseline", "Cycle 3")) %>% filter(PtPathway %in% pt_bl_c3) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+test <- fc_c3 %>% group_by(Patient_ID) %>% dplyr::summarise(log2FC = mean(log2FC))
+test$Pathway = avg_name
+fc_c3 <- rbind(fc_c3, test)
+fc_c3$Time = "Cycle 3"
+pt_bl_trough <- d %>% 
+  filter(Time %in% c("Baseline", "Trough")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_trough <- d %>%filter(Time %in% c("Baseline", "Trough")) %>% filter(PtPathway %in% pt_bl_trough) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+test <- fc_trough %>% group_by(Patient_ID) %>% dplyr::summarise(log2FC = mean(log2FC))
+test$Pathway = avg_name
+fc_trough <- rbind(fc_trough, test)
+fc_trough$Time = "Trough"
+
+fc <- rbind(fc_c3, fc_trough)
+
+# Fix names
+fc$Pathway <- gsub("\\&", "", fc$Pathway)
+fc$Pathway <- gsub("\\;", "", fc$Pathway)
+fc$Pathway <- gsub(".*\\: ", "", fc$Pathway)
+
+# Sort
+pt_order <- fc %>% group_by(Patient_ID) %>% dplyr::summarise(mu = sum(log2FC)) %>%
+  arrange(mu) %>% select(Patient_ID) %>% pull()
+fc$Patient_ID <- factor(fc$Patient_ID, levels = rev(pt_order))
+
+pathway_order <- fc %>% group_by(Pathway) %>% dplyr::summarise(mu = sum(log2FC)) %>%
+  arrange(mu) %>% select(Pathway) %>% pull()
+fc$Pathway <- factor(fc$Pathway, levels = pathway_order) # order pathways
+
+# Filter to trough only
+fc <- fc %>% filter(Time == timegroup)
+
+# Plot
+plotlimits = 10
+fc$`Post/Baseline (log2FC)` <- fc$log2FC
+fc$`Cycle 3/Baseline (log2FC)` <- fc$log2FC
+if (timegroup == "Trough"){
+  p <- ggplot(fc, aes(x = Patient_ID, y = Pathway, fill = `Post/Baseline (log2FC)`)) 
+} else {
+  p <- ggplot(fc, aes(x = Patient_ID, y = Pathway, fill = `Cycle 3/Baseline (log2FC)`)) 
+}
+
+# Heatmap with ggplot2
+df_wide <- fc %>% select(-Time) %>% select(-`Post/Baseline (log2FC)`) %>% select(-`Cycle 3/Baseline (log2FC)`) %>% 
+  tidyr::pivot_wider(names_from = Patient_ID, values_from = log2FC) %>%
+  as.data.frame()
+rownames(df_wide) <- df_wide$Pathway; df_wide <- df_wide %>% select(-Pathway)
+df_matrix <- as.matrix(df_wide)
+
+# Perform hierarchical clustering on rows and columns
+if (timegroup == "Trough"){
+  row_clusters <- hclust(dist(df_matrix, method = "euclidean"), method = "ward.D2")
+  col_clusters <- hclust(dist(t(df_matrix), method = "euclidean"), method = "ward.D2")
+} else {
+  row_clusters <- hclust(dist(df_matrix, method = "euclidean"), method = "ward.D2")
+  col_clusters <- hclust(dist(t(df_matrix), method = "euclidean"), method = "ward.D2")
+}
+
+# Order the matrix according to the clustering
+ordered_matrix <- df_matrix[row_clusters$order, col_clusters$order]
+
+# Melt the ordered matrix for ggplot2
+df_long <- reshape2::melt(ordered_matrix)
+colnames(df_long) <- c("Pathway", "Patient_ID", "log2FC")
+
+# Plot using ggplot2
+df_long$`log2FC/Baseline` <- df_long$log2FC
+df_long$Pathway <- factor(df_long$Pathway, levels = rev(hits)) # reorder
+new_pt_order <- df_long %>% filter(Pathway == "Average") %>% arrange(log2FC) %>% select(Patient_ID) %>% pull() # Manually reorder by the average score
+df_long$Patient_ID <- factor(df_long$Patient_ID, levels = rev(new_pt_order))
+
+p <- ggplot(df_long, aes(x = Patient_ID, y = Pathway, fill = `log2FC/Baseline`)) +
+  geom_tile() +
+  scale_fill_gradientn(
+    colors = c("orange", "white", "blue"),
+    values = scales::rescale(c(-plotlimits, 0, plotlimits)),
+    limits = c(-plotlimits, plotlimits),
+    oob = scales::squish
+  ) +
+  xlab("Patient") + 
+  ylab("") +  # formerly "KEGG Ortholog"
+  theme_pubr() +
+  theme(axis.text.x = element_blank()) 
+
+# Save
+fn <- paste0(figdir, "MenaquinolHeatmap", timegroup, ".pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 4)
+```
+
+## Responsible taxa
+```{r}
+time = "Trough"
+
+# Get hits
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+fdr_cutoff <- 0.2
+v <- v %>% filter(!(grepl("UNINTEGRATED|mitochondria", Gene))) # remove global pathways
+hits <- v %>% filter(FDR < fdr_cutoff) %>% filter(grepl("menaquinol", Gene)) %>% select(Gene) %>% pull()
+
+# Read in stratified abundance data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceStratified.csv")
+t <- read.csv(fn) 
+t$Organism <- gsub(".*\\|", "", t$Pathway)
+t$Pathway <- gsub("\\|.*", "", t$Pathway)
+t_save <- t
+
+# Go through all hits
+for (hit in hits){
+  t <- t_save %>% filter(Pathway %in% hit)
+  df <- reshape2::melt(t, by = c("Pathway", "Organism"))
+  colnames(df) <- c("Pathway", "Organism", "Sample", "Abundance")
+  df_tots <- df %>% group_by(Sample, Pathway) %>% dplyr::summarise(Total = sum(Abundance)) %>% as.data.frame()
+  df <- left_join(df, df_tots, by = c("Sample", "Pathway"))
+  df$Proportion <- df$Abundance/df$Total
+  df <- left_join(df, metadata, by = "Sample")
+  df <- df %>% filter(Time == time)
+  
+  # Plot
+  df_wide <- df %>% select(Patient_ID, Proportion, Organism) %>%
+    tidyr::pivot_wider(names_from = Patient_ID, values_from = Proportion) %>%
+    as.data.frame()
+  rownames(df_wide) <- df_wide$Organism; df_wide <- df_wide %>% select(-Organism)
+  df_matrix <- as.matrix(df_wide)
+  df_matrix[is.na(df_matrix)] <- 0
+  
+  # Perform hierarchical clustering on rows and columns
+  if (length(unique(rownames(df_matrix))) > 1){
+    row_clusters <- hclust(dist(df_matrix, method = "euclidean"), method = "ward.D2")
+    row_orders = rev(row_clusters$order)
+  } else {
+    row_orders = rownames(df_matrix)
+  }
+  if (length(unique(rownames(df_matrix))) > 1){
+    col_clusters <- hclust(dist(t(df_matrix), method = "euclidean"), method = "ward.D2")
+    col_orders = col_clusters$order
+  } else {
+    col_orders = colnames(df_matrix)
+  }
+  
+  # Order the matrix according to the clustering
+  ordered_matrix <- df_matrix[row_orders, col_orders]
+  
+  # Melt the ordered matrix for ggplot2
+  df_long <- reshape2::melt(ordered_matrix)
+  colnames(df_long) <- c("Organism", "Patient_ID", "Proportion")
+  
+  # Plot using ggplot2
+  p <- ggplot(df_long, aes(x = Patient_ID, y = Organism, fill = Proportion)) +
+    geom_tile() +
+    scale_fill_gradientn(
+      colors = c("white", "blue"),
+      values = scales::rescale(c(0, 1)),
+      limits = c(0, 1),
+      oob = scales::squish
+    ) +
+    xlab("Patient") + 
+    ylab("Organism") + 
+    theme_pubr() +
+    theme(axis.text.x = element_blank()) + 
+    ggtitle(hit) +
+    theme(plot.title = element_text(size=11)) + 
+    theme(legend.position = "right")
+  
+  # Save
+  hit_short <- gsub("\\:.*", "", hit)
+  fn <- paste0(figdir, "Stratified", hit_short, ".pdf")
+  ggsave(filename = fn, plot = p, height = 3, width = 9)
+}
+```
+
+## Stratified stacked bargraph 
+```{r}
+# Get hits
+fn <- paste0(tabledir, "PathwayDE/Groups.csv")
+v <- read.csv(fn)
+fdr_cutoff <- 0.2
+v <- v %>% filter(!(grepl("UNINTEGRATED|mitochondria", Gene))) # remove global pathways
+hits <- v %>% filter(FDR < fdr_cutoff) %>% filter(grepl(" menaquinol", Gene)) %>% select(Gene) %>% pull()
+
+# Read in stratified abundance data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceStratified.csv")
+test <- read.csv(fn) 
+test$Organism <- gsub(".*\\|", "", test$Pathway)
+test$Pathway <- gsub("\\|.*", "", test$Pathway)
+test <- test %>% filter(Pathway %in% hits)
+test <- test %>% select(-Pathway)
+test <- reshape2::melt(test, by = "Organism")
+test$Time <- case_when(grepl("T1", test$variable) ~ "Baseline", 
+                       grepl("T2", test$variable) ~ "Cycle 3",
+                       TRUE ~ "Post")
+test$Organism = gsub("g__", "", test$Organism)
+test$Organism = gsub("\\.s__.*", "", test$Organism)
+test <- test %>% group_by(Organism, Time) %>% dplyr::summarise(sum = sum(value)) %>% arrange(sum)
+test$Organism <- case_when(test$Organism == "Escherichia" ~ "Escherichia",
+                           test$Organism == "Klebsiella" ~ "Klebsiella",
+                           test$Organism == "unclassified" ~ "Unclassified",
+                           TRUE ~ "Other")
+
+# Plot
+test$Time <- factor(test$Time, levels = c("Post", "Cycle 3", "Baseline"))
+p <- ggplot(test, aes(fill=Organism, x=sum/51, y=Time)) + 
+    geom_bar(position="stack", stat="identity") + 
+  theme(legend.title=element_blank()) + 
+  xlab("Menaquinol pathways\n(mean RPKG)") + 
+  theme_pubr() + 
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("")
+  
+# Save
+fn <- paste0(figdir, "MenaquinolStratified.pdf")
+ggsave(filename = fn, plot = p, width = 2.5, height = 1.5)
+```
+
+## Menaquinol change vs metadata
+```{r}
+timegroup = "Trough" # "Trough" or "Cycle 3"
+metadata_time = "Baseline" # which metadata variables to look at?
+
+# Set hits
+hits = c("K02552", "K02551", "K08680", "K02549", "K01911", "K01661", "K19222", "K02548", "K03183") # https://www.genome.jp/module/M00116+K03183 - menaquinol KOs
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% hits) %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Calculate fold-change
+avg_name = "Mean"
+d <- df_plot %>% as.data.frame()
+d$PtPathway <- paste0(d$Patient_ID, d$Pathway)
+pt_bl_c3 <- d %>% 
+  filter(Time %in% c("Baseline", "Cycle 3")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_c3 <- d %>% filter(Time %in% c("Baseline", "Cycle 3")) %>% filter(PtPathway %in% pt_bl_c3) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+test <- fc_c3 %>% group_by(Patient_ID) %>% dplyr::summarise(log2FC = mean(log2FC))
+test$Pathway = avg_name
+fc_c3 <- rbind(fc_c3, test)
+fc_c3$Time = "Cycle 3"
+pt_bl_trough <- d %>% 
+  filter(Time %in% c("Baseline", "Trough")) %>% 
+  group_by(PtPathway) %>% 
+  dplyr::summarise(n = n()) %>% 
+  filter(n == 2) %>%
+  select(PtPathway) %>%
+  pull()
+fc_trough <- d %>%filter(Time %in% c("Baseline", "Trough")) %>% filter(PtPathway %in% pt_bl_trough) %>% group_by(Patient_ID, Pathway) %>% dplyr::summarise(log2FC = log2((Abundance[Time != "Baseline"]+0.001)/(Abundance[Time == "Baseline"]+0.001))) # per-patient fold change
+test <- fc_trough %>% group_by(Patient_ID) %>% dplyr::summarise(log2FC = mean(log2FC))
+test$Pathway = avg_name
+fc_trough <- rbind(fc_trough, test)
+fc_trough$Time = "Trough"
+
+fc <- rbind(fc_c3, fc_trough)
+fc <- fc %>% filter(Pathway == avg_name)
+
+# Filter
+fc <- fc %>% filter(Time == timegroup)
+
+meta_join <- metadata %>% filter(Time == metadata_time)
+fc <- left_join(fc, meta_join, by = "Patient_ID")
+
+# Make group for log2FC categorical - up vs down
+fc$UD <- case_when(fc$log2FC > 0 ~ "Up",
+                   fc$log2FC < 0 ~ "Down", 
+                   TRUE ~ NA)
+fc <- fc %>% filter(!is.na(UD))
+
+# Stage
+library(vcd)
+library(DescTools) # for mantel-cox-haezen test
+fc_test <- fc %>% filter(Stage_bin <= 100) %>% dplyr::rename(Var = Stage_bin)
+fc_test$Var <- case_when(fc_test$Var > 0 ~ "IV", TRUE ~ "II-III")
+contingency_table <- table(fc_test$UD, fc_test$Var)
+v <- assocstats(contingency_table)$cramer # cramer's v. If close to 1, strong association
+fish <- fisher.test(contingency_table, hybrid = TRUE)
+chisq <- chisq.test(contingency_table, correct = FALSE)
+logreg <- glm(Var ~ UD, family = binomial, data = data.frame(UD = factor(fc_test$UD), Var = factor(fc_test$Var)))
+lr <- summary(logreg)
+g <- GTest(contingency_table, correct = "none") # Likelihood Ratio Test
+p.value = g$p.value/2 # one-sided
+
+# Plot
+fc_test$Var <- factor(fc_test$Var, levels = c("II-III", "IV"))
+p <- ggplot(fc_test, aes(x = UD, fill = Var)) +
+  geom_bar(position = "stack") +
+  labs(x = "Menaquinol change", y = "Count", fill = "Stage") +
+  scale_fill_manual(values = c("II-III" = "black", "IV" = "#FF000080")) + 
+  theme_pubr() +
+  annotate("text", x=1.5, y=38, label = paste("italic(p) == ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE) 
+
+# Save
+fn <- paste0(figdir, "MenaquinolvsStage.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+
+# Dose reduction
+library(vcd)
+library(DescTools) # for mantel-cox-haezen test
+fc_test <- fc %>% filter(DoseReduction_T2_v2 <= 100) %>% dplyr::rename(Var = DoseReduction_T2_v2)
+fc_test$Var <- case_when(fc_test$Var > 0 ~ "Yes", TRUE ~ "No")
+contingency_table <- table(fc_test$UD, fc_test$Var)
+v <- assocstats(contingency_table)$cramer # cramer's v. If close to 1, strong association
+fish <- fisher.test(contingency_table, hybrid = TRUE)
+chisq <- chisq.test(contingency_table, correct = FALSE)
+logreg <- glm(Var ~ UD, family = binomial, data = data.frame(UD = factor(fc_test$UD), Var = factor(fc_test$Var)))
+lr <- summary(logreg)
+g <- GTest(contingency_table, correct = "none") # Likelihood Ratio Test
+p.value = g$p.value/2 # one-tailed test
+
+# Plot
+fc_test$Var <- factor(fc_test$Var, levels = c("Yes", "No"))
+p <- ggplot(fc_test, aes(x = UD, fill = Var)) +
+  geom_bar(position = "stack") +
+  labs(x = "Menaquinol change", y = "Count", fill = "Dose reduction") +
+  scale_fill_manual(values = yes_palette) + 
+  theme_pubr() +
+  annotate("text", x=1.5, y=38, label = paste("italic(p) == ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE) 
+
+# Save
+fn <- paste0(figdir, "MenaquinolvsDoseReductionT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+# Microbiome vs metadata categories
+```{r}
+figdir <- paste0(savedir, "MicrobiomeMetadata/")
+dir.create(figdir)
+```
+
+## PCA taxa pt
+```{r}
+tox_cat = "Patient_ID"
+taxLevel = "Species"
+time = "Baseline"
+outliers = ""
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+d <- read.csv(fn)
+rownames(d) <- d$Taxa; d <- d %>% select(-Taxa)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Match metadata, data columns
+meta <- metadata %>% filter(Sample %in% rownames(clr_data_t) & Sample %in% rownames(d_t)) # only keep samples that we have sequencing data for
+meta <- meta %>% filter(!(Sample %in% outliers))
+meta$Tox <- meta[[tox_cat]]
+meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+clr_data_t <- clr_data_t[meta$Sample,] # and vice versa for metadata matching
+d_t <- d_t[meta$Sample,]
+
+# PERMANOVA
+meta_perm <- meta # microbiome timepoint: all!
+row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+    print("PERMANVA order wrong!")
+}
+dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+set.seed(42)
+res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+
+# Get p value
+p.value <- res_clr$`Pr(>F)`[1]
+r2 <- res_clr$`R2`[1]
+  
+# PCA and plot
+pca_results <- prcomp(d_ordered, center = TRUE)
+eigs <- pca_results$sdev^2
+eigs <- round(eigs/sum(eigs) * 100, digits = 1)
+pca_data <- as.data.frame(pca_results$x)
+pca_data$Sample <- rownames(pca_data)
+pca_merged <- inner_join(pca_data, meta, by = "Sample")
+data2 <- pca_merged
+axis1 = 1; axis2 = 2
+data2$Time <- factor(data2$Time, levels = c("Baseline", "Cycle 3", "Trough"))
+
+p <- ggplot(data2, aes(x = .data[[paste0("PC", axis1)]], y = .data[[paste0("PC", axis2)]])) +
+  geom_point(aes(color = Tox), size = 1.5) +
+  geom_path(aes(color = Tox, group = Tox), arrow = arrow(length = unit(0.2, "cm"))) + 
+  #geom_line(aes(color = Tox, group = Tox)) + 
+  theme_pubr() +
+  labs(x = paste0("PC", axis1, " (", eigs[axis1], "% Variation)"),
+       y = paste0("PC", axis2, " (", eigs[axis2], "% Variation)"),
+       color = "Prior antibiotics") + 
+  annotate("text", x=8, y=15, label = paste("R^2 == ", formatC(signif(r2, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE) +
+  annotate("text", x=8, y=12, label = paste("italic(p) < ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE) + 
+  theme(legend.position = "none") + 
+  xlim(-10.5, 13)
+
+# Save
+fn <- paste0(figdir, "PtPCA.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Every PERMANOVA taxa
+
+```{r}
+# Variables
+taxLevel = "Species"
+tox_cats = c("Age_bin", "Sex..MR.", "BMI_bin", "Stage_bin", "Co.treatment.with.bevacizumab", "Left.or.rightsided.tumor", "Colostomy", "Prior.systemic.treatment..MR.", "Prior.chemoradiation..MR.", "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED.", "Colorectal.surgery_past..Q.", "Proton.pump.inhibitor.use..MR.")
+time = "Baseline"
+outliers = c("") # c("NE_P04_T1", "NE_P15_T1") # outliers to filter, from "Sample"
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+d <- read.csv(fn)
+rownames(d) <- d$Taxa; d <- d %>% select(-Taxa)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time) # microbiome timepoint, i.e. Baseline/T1
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(3)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+
+# Rename categories
+res$Tox <- case_when(res$Tox == "Age_bin" ~ "Age",
+                     res$Tox == "BMI_bin" ~ "BMI",
+                     res$Tox == "Co.treatment.with.bevacizumab" ~ "Bevacizumab",
+                     res$Tox == "Colostomy" ~ "Colostomy",
+                     res$Tox == "Prior.chemoradiation..MR." ~ "Prior chemoradiation",
+                     res$Tox == "Colorectal.surgery_past..Q." ~ "Prior colorectal surgery",
+                     res$Tox == "Sex..MR." ~ "Sex",
+                     res$Tox == "Stage_bin" ~ "Stage",
+                     res$Tox == "Left.or.rightsided.tumor" ~ "Tumor sidedness",
+                     res$Tox == "Prior.systemic.treatment..MR." ~ "Prior systemic treatment",
+                     res$Tox == "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED." ~ "Prior antibiotics",
+                     res$Tox == "Proton.pump.inhibitor.use..MR." ~ "Prior PPI",
+                     TRUE ~ res$Tox)
+
+order <- res %>% group_by(Tox) %>% dplyr::summarise(max = max(R2.CLR)) %>% arrange(max) %>% select(Tox) %>% pull()
+res$Tox <- factor(res$Tox, levels = order)
+res$FDR <- p.adjust(res$p.CLR, method = "BH") # FDR adjust
+
+p <- ggplot(res, aes(x = R2.CLR, y = Tox)) + 
+  #facet_wrap(~Cycle) + 
+  geom_col(aes(fill = ifelse(FDR <= 0.2, "FDR < 0.2", "FDR > 0.2")), color = "black") + 
+  theme_pubr() + 
+  xlab("Baseline microbial species\nvariance explained (R2)") + 
+  ylab("Patient variable") + 
+  scale_fill_manual(values = tox_sig_palette) + 
+  theme(legend.title=element_blank()) + 
+  xlim(0, 0.04) + 
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "TaxaPERMANOVA.pdf")
+ggsave(filename = fn, plot = p, width = 4, height = 3)
+```
+
+## Every PERMANOVA pathway
+```{r}
+# Variables
+time = "Baseline"
+outliers = c("NE_P24_T1", "NE_P33_T1", "NE_P47_T1") # outliers to filter, from "Sample"
+tox_cats = c("Age_bin", "Sex..MR.", "BMI_bin", "Stage_bin", "Co.treatment.with.bevacizumab", "Left.or.rightsided.tumor", "Colostomy", "Prior.systemic.treatment..MR.", "Prior.chemoradiation..MR.", "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED.", "Colorectal.surgery_past..Q.", "Proton.pump.inhibitor.use..MR.")
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn)
+d <- d %>% filter(!(Pathway %in% c("UNMAPPED")))
+rownames(d) <- d$Pathway; d <- d %>% select(-Pathway)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time)
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(123)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+```
+
+## Every PERMANOVA KO
+```{r}
+# Variables
+time = "Baseline"
+outliers = c("NE_P43_T1", "NE_P44_T1", "NE_P24_T1", "NE_P33_T1", "NE_P47_T1") # outliers to filter, from "Sample"
+tox_cats = c("Age_bin", "Sex..MR.", "BMI_bin", "Stage_bin", "Co.treatment.with.bevacizumab", "Left.or.rightsided.tumor", "Colostomy", "Prior.systemic.treatment..MR.", "Prior.chemoradiation..MR.", "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED.", "Colorectal.surgery_past..Q.", "Proton.pump.inhibitor.use..MR.")
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn)
+d <- d %>% filter(!(KO %in% c("UNMAPPED", "UNINTEGRATED")))
+rownames(d) <- d$KO; d <- d %>% select(-KO) %>% select(-X)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time)
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(123)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+```
+
+## PCA taxa abx
+```{r}
+tox_cat = "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED."
+taxLevel = "Species"
+time = "Baseline"
+outliers = ""
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+d <- read.csv(fn)
+rownames(d) <- d$Taxa; d <- d %>% select(-Taxa)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Match metadata, data columns
+meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t) & Sample %in% rownames(d_t)) # only keep samples that we have sequencing data for
+meta <- meta %>% filter(!(Sample %in% outliers))
+meta$Tox <- meta[[tox_cat]]
+meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta$Tox <- case_when(meta$Tox > 0 ~ 1,
+                      TRUE ~ 0) # binarize
+clr_data_t <- clr_data_t[meta$Sample,] # and vice versa for metadata matching
+d_t <- d_t[meta$Sample,]
+
+# PERMANOVA
+meta_perm <- meta %>% filter(Time == "Baseline") # microbiome timepoint: Baseline/T1
+row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+    print("PERMANVA order wrong!")
+}
+dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+dist_jac <- vegdist(d_ordered, method="jaccard", na.rm = TRUE) # Jaccard
+set.seed(42)
+res_jac <- adonis2(dist_jac ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+
+# Get p value
+p.value <- res_clr$`Pr(>F)`[1]
+
+# PCA and plot
+pca_results <- prcomp(d_ordered, center = TRUE)
+eigs <- pca_results$sdev^2
+eigs <- round(eigs/sum(eigs) * 100, digits = 1)
+pca_data <- as.data.frame(pca_results$x)
+pca_data$Sample <- rownames(pca_data)
+pca_merged <- inner_join(pca_data, meta, by = "Sample")
+data2 <- pca_merged
+axis1 = 1; axis2 = 2
+
+data2$Tox <- case_when(data2$Tox == 0 ~ "No",
+                       TRUE ~ "Yes")
+p <- ggplot(data2, aes(x = .data[[paste0("PC", axis1)]], y = .data[[paste0("PC", axis2)]])) +
+  geom_point(aes(color = Tox), size = 1.5) +
+  theme_pubr() +
+  labs(x = paste0("PC", axis1, " (", eigs[axis1], "% Variation)"),
+       y = paste0("PC", axis2, " (", eigs[axis2], "% Variation)"),
+       color = "Prior antibiotics") + 
+  scale_color_manual(values = yes_palette) + 
+  annotate("text", x=-20, y=30, label = paste("italic(p) == ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE)
+
+# Save
+fn <- paste0(figdir, "AbxPCA.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Alpha all - richness
+```{r}
+cats = c("Age_bin", "Sex..MR.", "BMI_bin", "Stage_bin", "Co.treatment.with.bevacizumab", "Left.or.rightsided.tumor", "Colostomy", "Prior.systemic.treatment..MR.", "Prior.chemoradiation..MR.", "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED.", "Colorectal.surgery_past..Q.", "Proton.pump.inhibitor.use..MR.")
+
+# Read in data and calculate diversity
+time = "Baseline"
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+presence_cutoff = 0.01
+div <- colSums(t %>% select(-Taxa) > presence_cutoff)
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+
+# Calculate tox for all categories
+res = NULL
+
+for (cat in cats){
+  meta_div <- metadata
+  meta_div$Cat <- meta_div[[cat]]
+  meta_div <- meta_div %>% filter(!is.na(Cat)) %>% filter(Cat != 9999) %>% filter(Cat != 5555) # exclude samples with no tox info
+  meta_div <- meta_div %>% filter(Time == time)
+  df_merge <- inner_join(df, meta_div, by = "Sample")
+  
+  # Stats test
+  test <- t.test(Diversity ~ Cat, data = df_merge)
+  p_value <- test$p.value
+  group0 <- test$estimate[[1]]
+  group1 <- test$estimate[[2]]
+  new_row <- data.frame("Cat" = cat, "p" = p_value, "Estimate" = group1 - group0)
+  if (length(res) == 0){ res <- new_row}else{res <- rbind(res, new_row)}
+}
+```
+
+## Alpha all - evenness
+```{r}
+cats = c("Age_bin", "Sex..MR.", "BMI_bin", "Stage_bin", "Co.treatment.with.bevacizumab", "Left.or.rightsided.tumor", "Colostomy", "Prior.systemic.treatment..MR.", "Prior.chemoradiation..MR.", "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED.", "Colorectal.surgery_past..Q.", "Proton.pump.inhibitor.use..MR.")
+
+# Read in data and calculate diversity
+time = "Baseline"
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+
+
+# Calculate tox for all categories
+res = NULL
+
+for (cat in cats){
+  meta_div <- metadata
+  meta_div$Cat <- meta_div[[cat]]
+  meta_div <- meta_div %>% filter(!is.na(Cat)) %>% filter(Cat != 9999) %>% filter(Cat != 5555) # exclude samples with no tox info
+  meta_div <- meta_div %>% filter(Time == time)
+  df_merge <- inner_join(df, meta_div, by = "Sample")
+  
+  # Stats test
+  test <- t.test(Diversity ~ Cat, data = df_merge)
+  p_value <- test$p.value
+  group0 <- test$estimate[[1]]
+  group1 <- test$estimate[[2]]
+  new_row <- data.frame("Cat" = cat, "p" = p_value, "Estimate" = group1 - group0)
+  if (length(res) == 0){ res <- new_row}else{res <- rbind(res, new_row)}
+}
+
+# Rename categories
+res$Cat <- case_when(res$Cat == "Age_bin" ~ "Age",
+                     res$Cat == "BMI_bin" ~ "BMI",
+                     res$Cat == "Co.treatment.with.bevacizumab" ~ "Bevacizumab",
+                     res$Cat == "Colostomy" ~ "Colostomy",
+                     res$Cat == "Prior.chemoradiation..MR." ~ "Prior chemoradiation",
+                     res$Cat == "Colorectal.surgery_past..Q." ~ "Prior colorectal surgery",
+                     res$Cat == "Sex..MR." ~ "Sex",
+                     res$Cat == "Stage_bin" ~ "Stage",
+                     res$Cat == "Left.or.rightsided.tumor" ~ "Tumor sidedness",
+                     res$Cat == "Prior.systemic.treatment..MR." ~ "Prior systemic treatment",
+                     res$Cat == "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED." ~ "Prior antibiotics",
+                     res$Cat == "Proton.pump.inhibitor.use..MR." ~ "Prior PPI",
+                     TRUE ~ res$Cat)
+
+# Plot
+order <- res %>% group_by(Cat) %>% dplyr::summarise(max = max(abs(Estimate))) %>% arrange(max) %>% select(Cat) %>% pull()
+res$Cat <- factor(res$Cat, levels = order)
+res$FDR <- p.adjust(res$p, method = "BH") # FDR adjust
+
+p <- ggplot(res, aes(x = abs(Estimate), y = Cat)) + 
+  #facet_wrap(~Cycle) + 
+  geom_col(aes(fill = ifelse(FDR <= 0.2, "FDR < 0.2", "FDR > 0.2")), color = "black") + 
+  theme_pubr() + 
+  xlab("Between-group\nShannon difference") + 
+  ylab("Patient variable") + 
+  scale_fill_manual(values = tox_sig_palette) + 
+  theme(legend.title=element_blank()) + 
+  #scale_x_continuous(breaks=c(0, 0.01, 0.02, 0.03), labels=c("0", "0.01", "0.02", "0.03")) + 
+  theme(legend.position = "right")
+
+# Saveg
+fn <- paste0(figdir, "TaxaShannonWithLegend.pdf")
+ggsave(filename = fn, plot = p, width = 4, height = 3)
+
+fn <- paste0(figdir, "TaxaShannonNoLegend.pdf")
+ggsave(filename = fn, plot = p + theme(legend.position = "none"), width = 4, height = 3)
+```
+
+## Shannon abx
+```{r}
+tox_cat = "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED."
+time = "Baseline"
+
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+meta_div <- metadata
+meta_div$Tox <- meta_div[[tox_cat]]
+meta_div <- meta_div %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta_div$Tox <- case_when(meta_div$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+meta_div <- meta_div %>% filter(Time == time)
+
+# Calculate diversity
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+df <- inner_join(df, meta_div, by = "Sample")
+
+# Plot
+df$Tox <- factor(df$Tox)
+p <- ggplot(df, aes(x = Tox, y = Diversity)) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.2) + 
+  geom_point(aes(color = Tox)) + 
+  xlab("Prior antibiotics") + 
+  ylab("Shannon") + 
+  stat_compare_means(label.x = 1.2, label.y = 4.6, method = "t.test", aes(label = paste0("italic(p) ==", after_stat(p.format))), parse = TRUE) + 
+  scale_color_manual(values = yes_palette) + 
+  scale_fill_manual(values = yes_palette) + 
+  ylim(2.3, 4.7) + 
+  theme_pubr() + 
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "ShannonAbx.pdf")
+ggsave(filename = fn, plot = p, width = 1.5, height = 3)
+```
+
+## Shannon prior systemic treatment
+```{r}
+tox_cat = "Prior.systemic.treatment..MR."
+time = "Baseline"
+
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+meta_div <- metadata
+meta_div$Tox <- meta_div[[tox_cat]]
+meta_div <- meta_div %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta_div$Tox <- case_when(meta_div$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+meta_div <- meta_div %>% filter(Time == time)
+
+# Calculate diversity
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+df <- inner_join(df, meta_div, by = "Sample")
+
+# Plot
+df$Tox <- factor(df$Tox)
+p <- ggplot(df, aes(x = Tox, y = Diversity)) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.2) + 
+  geom_point(aes(color = Tox)) + 
+  xlab("Prior systemic\ntreatment") + 
+  ylab("Shannon") + 
+  stat_compare_means(label.x = 1.2, label.y = 4.6, method = "t.test", aes(label = paste0("italic(p) ==", after_stat(p.format))), parse = TRUE) + 
+  scale_color_manual(values = yes_palette) + 
+  scale_fill_manual(values = yes_palette) + 
+  ylim(2.3, 4.7) + 
+  theme_pubr() + 
+  theme(legend.position = "none")
+
+# Saveg
+fn <- paste0(figdir, "ShannonTx.pdf")
+ggsave(filename = fn, plot = p, width = 1.5, height = 3)
+```
+
+## Shannon both
+```{r}
+tox_cat1 = "Antibiotics_last.year.therapeutic...profylactic.combined..MR...Q.COMBINED."
+tox_cat2 = "Prior.systemic.treatment..MR."
+time = "Baseline"
+
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+meta_div <- metadata
+meta_div$Tox1 <- meta_div[[tox_cat1]]
+meta_div <- meta_div %>% filter(!is.na(Tox1)) %>% filter(Tox1 != 9999) %>% filter(Tox1 != 5555) # exclude samples with no tox info
+meta_div$Tox1 <- case_when(meta_div$Tox1 > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+meta_div$Tox2 <- meta_div[[tox_cat2]]
+meta_div <- meta_div %>% filter(!is.na(Tox2)) %>% filter(Tox2 != 9999) %>% filter(Tox2 != 5555) # exclude samples with no tox info
+meta_div$Tox2 <- case_when(meta_div$Tox2 > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+meta_div <- meta_div %>% filter(Time == time)
+
+meta_div$Tox <- case_when(meta_div$Tox1 == "Yes" & meta_div$Tox2 == "Yes" ~ "Both",
+                          meta_div$Tox1 == "Yes" & meta_div$Tox2 == "No" ~ "ABX",
+                          meta_div$Tox1 == "No" & meta_div$Tox2 == "Yes" ~ "Systemic",
+                          TRUE ~ "Neither")
+
+# Calculate diversity
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+df <- inner_join(df, meta_div, by = "Sample")
+
+# Plot
+df$Tox <- factor(df$Tox, levels = c("Neither", "ABX", "Systemic", "Both"))
+new_palette = c("Neither" = "grey", "ABX" = "red", "Systemic" = "blue", "Both" = "purple")
+p <- ggplot(df, aes(x = Tox, y = Diversity)) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.2) + 
+  geom_point(aes(color = Tox)) + 
+  xlab("Prior antibiotics and/or systemic treatment") + 
+  ylab("Shannon") + 
+  #stat_compare_means(label.x = 3.5, label.y = 4.6, method = "anova", aes(label = paste0("italic(p) ==", after_stat(p.format))), parse = TRUE) + 
+  stat_compare_means(method = "t.test", aes(label = paste0("italic(p) ==", after_stat(p.format))), comparisons = list(c("Neither", "Both")), parse = TRUE, label.y = 4.6) + 
+  stat_compare_means(method = "t.test", aes(label = paste0("italic(p) ==", after_stat(p.format))), comparisons = list(c("Systemic", "Both")), parse = TRUE, label.y = 4.4) + 
+ ylim(2.3, 4.8) + 
+  scale_color_manual(values = new_palette) + 
+  scale_fill_manual(values = new_palette) + 
+  theme_pubr() + 
+  theme(legend.position = "none")
+
+# Saveg
+fn <- paste0(figdir, "ShannonBoth.pdf")
+ggsave(filename = fn, plot = p, width = 4, height = 3)
+```
+
+# T2 chemotoxicity vs microbiota
+```{r}
+figdir <- paste0(savedir, "Toxicity/")
+dir.create(figdir)
+```
+
+## Boxplot of patient numbers
+```{r}
+tox_cats = c("HFS_T2", "HFS_T1", "HFS_T3", 
+             "PSN_T1", "PSN_T2", "PSN_T3", 
+             "OM_T1", "OM_T2", "OM_T3", 
+             "DoseReduction_T2_v2", "DoseReduction_T3_v2", 
+             "DoseDelay_T2", "DoseDelay_T3",
+             "Diarrhea_T1", "Diarrhea_T2", "Diarrhea_T3", 
+             "Fatigue_T1", "Fatigue_T2", "Fatigue_T3", 
+             "Nausea_T1", "Nausea_T2", "Nausea_T3",
+             "Constipation_T1", "Constipation_T2", "Constipation_T3",
+             "Fever_T2", "Fever_T3", # fever t1: only 1 contrast
+             "WeightLoss_T1", "WeightLoss_T2", "WeightLoss_T3",
+             "Alopecia_T1", "Alopecia_T2", "Alopecia_T3")
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn)
+meta <- metadata %>% select(all_of(c("Patient_ID", tox_cats, "Sample"))) 
+meta <- meta %>% filter(Sample %in% colnames(d)) %>% select(-"Sample")
+meta <- meta %>% reshape2::melt(by = "Patient_ID")
+colnames(meta) <- c("Patient_ID", "Toxicity", "Value")
+meta <- meta %>% filter(!is.na(Value)) %>% filter(Value != 9999) %>% filter(Value != 5555) # exclude samples with no tox info
+meta$Value <- case_when(meta$Value > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+meta$Cycle <- case_when(grepl("T1", meta$Toxicity) ~ "Baseline",
+                       grepl("T2", meta$Toxicity) ~ "Cycle 3", 
+                       TRUE ~ "Post")
+meta$Tox <- gsub("_.*", "", meta$Toxicity)
+
+# Rename tox categories
+meta$Tox <- case_when(meta$Tox == "PSN" ~ "Peripheral sensory neuropathy",
+                     meta$Tox == "OM" ~ "Oral mucositis",
+                     meta$Tox == "WeightLoss" ~ "Unintended weight loss",
+                     meta$Tox == "HFS" ~ "Hand-foot syndrome",
+                     meta$Tox == "DoseReduction" ~ "Dose reduction",
+                     meta$Tox == "DoseDelay" ~ "Dose delay",
+                     TRUE ~ meta$Tox)
+
+# Filter
+meta <- meta %>% filter(Cycle == "Cycle 3")
+meta <- meta %>% distinct()
+
+# Aggregate
+counts <- meta %>% filter(Value == "Yes") %>% group_by(Tox) %>% dplyr::summarise(n = n()) %>% as.data.frame()
+n_total = length(unique(meta$Patient_ID))
+
+# Plot
+p <- ggplot(counts, aes(x = reorder(Tox, n), y = n)) +
+  geom_bar(stat = "identity", color = "white", fill = "black") +
+  coord_flip() + # Flip coordinates to have 'Toxicity' on the y-axis
+  geom_text(aes(label = n), hjust = -0.3) + # Add text labels
+  labs(x = "", y = "Number of patients\n(out of 52)") +
+  theme_pubr() + 
+  theme(legend.position = "none") + 
+  ylim(0, 48)
+
+# Save
+fn <- paste0(figdir, "ToxCounts.pdf")
+ggsave(filename = fn, plot = p, width = 4.5, height = 3)
+```
+
+## Confusion matrix
+```{r}
+tox_cats = c("HFS_T2", "HFS_T1", "HFS_T3", 
+             "PSN_T1", "PSN_T2", "PSN_T3", 
+             "OM_T1", "OM_T2", "OM_T3", 
+             "DoseReduction_T2", "DoseReduction_T3", 
+             "DoseDelay_T2", "DoseDelay_T3",
+             "Diarrhea_T1", "Diarrhea_T2", "Diarrhea_T3", 
+             "Fatigue_T1", "Fatigue_T2", "Fatigue_T3", 
+             "Nausea_T1", "Nausea_T2", "Nausea_T3",
+             "Constipation_T1", "Constipation_T2", "Constipation_T3",
+             "Fever_T2", "Fever_T3", # fever t1: only 1 contrast
+             "WeightLoss_T1", "WeightLoss_T2", "WeightLoss_T3",
+             "Alopecia_T1", "Alopecia_T2", "Alopecia_T3")
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn)
+meta <- metadata %>% select(all_of(c("Patient_ID", tox_cats, "Sample"))) 
+meta <- meta %>% filter(Sample %in% colnames(d)) %>% select(-"Sample")
+meta <- meta %>% reshape2::melt(by = "Patient_ID")
+colnames(meta) <- c("Patient_ID", "Toxicity", "Value")
+meta <- meta %>% filter(!is.na(Value)) %>% filter(Value != 9999) %>% filter(Value != 5555) # exclude samples with no tox info
+meta$Value <- case_when(meta$Value > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+meta$Cycle <- case_when(grepl("T1", meta$Toxicity) ~ "Baseline",
+                       grepl("T2", meta$Toxicity) ~ "Cycle 3", 
+                       TRUE ~ "Post")
+meta$Tox <- gsub("_.*", "", meta$Toxicity)
+
+# Rename tox categories
+meta$Tox <- case_when(meta$Tox == "PSN" ~ "Peripheral sensory neuropathy",
+                     meta$Tox == "OM" ~ "Oral mucositis",
+                     meta$Tox == "WeightLoss" ~ "Unintended weight loss",
+                     meta$Tox == "HFS" ~ "Hand-foot syndrome",
+                     meta$Tox == "DoseReduction" ~ "Dose reduction",
+                     meta$Tox == "DoseDelay" ~ "Dose delay",
+                     TRUE ~ meta$Tox)
+
+# Filter
+#meta <- meta %>% filter(Cycle == "Cycle 3")
+meta <- meta %>% distinct()
+meta <- meta %>% select(Patient_ID, Toxicity, Value)
+
+# Plot
+# Reshape data from long to wide format
+df_wide <- meta %>%
+  tidyr::pivot_wider(names_from = Toxicity, values_from = Value, values_fill = list(Value = "No"))
+
+# Convert factors to binary (Yes/No to 1/0)
+df_wide[-1] <- lapply(df_wide[-1], function(x) as.integer(x == "Yes"))
+
+# Compute the confusion matrix
+toxicity_names <- names(df_wide)[-1]
+conf_matrix <- matrix(nrow = length(toxicity_names), ncol = length(toxicity_names),
+                      dimnames = list(toxicity_names, toxicity_names))
+
+for (i in seq_along(toxicity_names)) {
+  for (j in seq_along(toxicity_names)) {
+    yes_overlap <- sum(df_wide[[toxicity_names[i]]] == 1 & df_wide[[toxicity_names[j]]] == 1)
+    no_overlap <- sum(df_wide[[toxicity_names[i]]] == 0 & df_wide[[toxicity_names[j]]] == 0)
+    conf_matrix[i, j] <- yes_overlap + no_overlap
+  }
+}
+
+# Perform hierarchical clustering
+dissimilarity <- 1 - cor(conf_matrix)
+hc <- hclust(as.dist(dissimilarity))
+ordered_toxicities <- toxicity_names[hc$order]
+
+# Reorder matrix
+ordered_conf_matrix <- conf_matrix[hc$order, hc$order]
+
+# Create a dataframe for plotting
+conf_matrix_df <- as.data.frame(as.table(ordered_conf_matrix))
+names(conf_matrix_df) <- c("Toxicity1", "Toxicity2", "Freq")
+
+# Order factors explicitly
+conf_matrix_df$Toxicity1 <- factor(conf_matrix_df$Toxicity1, levels = ordered_toxicities)
+conf_matrix_df$Toxicity2 <- factor(conf_matrix_df$Toxicity2, levels = ordered_toxicities)
+
+# Plotting the confusion matrix using ggplot2
+p <- ggplot(conf_matrix_df, aes(Toxicity1, Toxicity2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "blue") +
+  theme_pubr() +
+  labs(title = "", x = "", y = "", fill = "Overlap Count") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Save
+fn <- paste0(figdir, "ConfusionMatrix.pdf")
+ggsave(filename = fn, plot = p, height = 9, width = 9)
+```
+
+## Tox vs composition 
+```{r}
+tox_cat = "DoseDelayReduction_T2"
+taxLevel = "Species"
+time = "Baseline"
+outliers = ""
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+d <- read.csv(fn)
+rownames(d) <- d$Taxa; d <- d %>% select(-Taxa)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Match metadata, data columns
+meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t) & Sample %in% rownames(d_t)) # only keep samples that we have sequencing data for
+meta <- meta %>% filter(!(Sample %in% outliers))
+meta$Tox <- meta[[tox_cat]]
+meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta$Tox <- case_when(meta$Tox > 0 ~ 1,
+                      TRUE ~ 0) # binarize
+clr_data_t <- clr_data_t[meta$Sample,] # and vice versa for metadata matching
+d_t <- d_t[meta$Sample,]
+
+# PERMANOVA
+meta_perm <- meta %>% filter(Time == "Baseline") # microbiome timepoint: Baseline/T1
+row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+    print("PERMANVA order wrong!")
+}
+dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+dist_jac <- vegdist(d_ordered, method="jaccard", na.rm = TRUE) # Jaccard
+set.seed(42)
+res_jac <- adonis2(dist_jac ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+
+# Get p value
+p.value <- res_bray$`Pr(>F)`[1]
+
+# PCA and plot
+pca_results <- prcomp(d_ordered, center = FALSE)
+eigs <- pca_results$sdev^2
+eigs <- round(eigs/sum(eigs) * 100, digits = 1)
+pca_data <- as.data.frame(pca_results$x)
+pca_data$Sample <- rownames(pca_data)
+pca_merged <- inner_join(pca_data, meta, by = "Sample")
+data2 <- pca_merged
+axis1 = 1; axis2 = 2
+
+data2$Tox <- case_when(data2$Tox == 0 ~ "No",
+                       TRUE ~ "Yes")
+p <- ggplot(data2, aes(x = .data[[paste0("PC", axis1)]], y = .data[[paste0("PC", axis2)]])) +
+  geom_point(aes(color = Tox), size = 1.5) +
+  theme_pubr() +
+  labs(x = paste0("PC", axis1, " (", eigs[axis1], "% Variation)"),
+       y = paste0("PC", axis2, " (", eigs[axis2], "% Variation)"),
+       color = "Toxicity") + 
+  scale_color_manual(values = yes_palette) + 
+  annotate("text", x=-10, y=40, label = paste("Bray-Curtis~italic(p) == ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE)
+
+# Save
+fn <- paste0(figdir, "PCA", taxLevel, "_", time, "_", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 3)
+```
+
+## Every PERMANOVA taxa
+```{r}
+# Variables
+taxLevel = "Genus"
+tox_cats = c("HFS_T2", "PSN_T2", "OM_T2", "DoseReduction_T2_v2", "DoseReduction_T3_v2", "DoseDelay_T2", "Diarrhea_T2", "Fatigue_T2", "DoseDelay_T3", "AnyTox_T2", "DoseDelayReduction_T2", "DoseDelayReduction_T3")
+time = "Trough"
+outliers = c("NE_P04_T1", "NE_P15_T1") # outliers to filter, from "Sample"
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "TaxaTables/Taxa", taxLevel, ".csv")
+d <- read.csv(fn)
+rownames(d) <- d$Taxa; d <- d %>% select(-Taxa)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time) # microbiome timepoint, i.e. Baseline/T1
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(3)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+```
+
+## Tox vs diversity - evenness
+```{r}
+tox_cat = "Diarrhea_T1"
+time = "Baseline"
+
+# Read in data - we'll look at species
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+meta_div <- metadata
+meta_div$Tox <- meta_div[[tox_cat]]
+meta_div <- meta_div %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta_div$Tox <- case_when(meta_div$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+meta_div <- meta_div %>% filter(Time == time)
+
+# Calculate diversity
+div <- vegan::diversity(t(t %>% select(-Taxa)), index = "shannon")
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+df <- inner_join(df, meta_div, by = "Sample")
+
+# Plot
+df$Tox <- factor(df$Tox)
+p <- ggplot(df, aes(x = Tox, y = Diversity)) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.2) + 
+  geom_point(aes(color = Tox)) + 
+  xlab("Toxicity at T2 (Cycle 3)") + 
+  ylab("Shannon") + 
+  stat_compare_means() + 
+  scale_color_manual(values = yes_palette) + 
+  scale_fill_manual(values = yes_palette) + 
+  theme_pubr() + 
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "Shannon_", time, "_", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, width = 2.5, height = 3)
+```
+
+## Tox vs diversity - richness
+```{r}
+tox_cat = "Diarrhea_T2"
+time = "Baseline"
+
+# Read in data and calculate diversity
+fn <- paste0(tabledir, "TaxaTables/TaxaSpecies.csv")
+t <- read.csv(fn)
+presence_cutoff = 0.01
+div <- colSums(t %>% select(-Taxa) > presence_cutoff)
+df <- reshape2::melt(div, by = NULL)
+colnames(df) <- "Diversity"; df$Sample <- rownames(df)
+
+meta_div <- metadata
+meta_div$Tox <- meta_div[[tox_cat]]
+meta_div <- meta_div %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta_div$Tox <- case_when(meta_div$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+meta_div <- meta_div %>% filter(Time == time)
+df <- inner_join(df, meta_div, by = "Sample")
+
+# Plot
+df$Tox <- factor(df$Tox)
+p <- ggplot(df, aes(x = Tox, y = Diversity)) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.2) + 
+  geom_point(aes(color = Tox)) + 
+  xlab("Toxicity at T2 (Cycle 3)") + 
+  ylab("Number of species") + 
+  stat_compare_means() + 
+  scale_color_manual(values = yes_palette) + 
+  scale_fill_manual(values = yes_palette) + 
+  theme_pubr() + 
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "NumSpecies_", time, "_", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, width = 2.5, height = 3)
+```
+
+## Tox vs pathways 
+```{r}
+tox_cat = "AnyTox_T2"
+time = "Baseline"
+outliers = c("NE_P24_T1", "NE_P33_T1", "NE_P47_T1") # outliers to filter, from "Sample"
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn)
+d <- d %>% filter(!(Pathway %in% c("UNMAPPED")))
+rownames(d) <- d$Pathway; d <- d %>% select(-Pathway)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Match metadata, data columns
+meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t) & Sample %in% rownames(d_t)) # only keep samples that we have sequencing data for
+meta <- meta %>% filter(!(Sample %in% outliers))
+meta$Tox <- meta[[tox_cat]]
+meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+clr_data_t <- clr_data_t[meta$Sample,] # and vice versa for metadata matching
+d_t <- d_t[meta$Sample,]
+
+# PERMANOVA
+meta_perm <- meta %>% filter(Time == "Baseline") # microbiome timepoint: Baseline/T1
+row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+    print("PERMANVA order wrong!")
+}
+dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+dist_jac <- vegdist(d_ordered, method="jaccard", na.rm = TRUE) # Jaccard
+set.seed(7)
+res_jac <- adonis2(dist_jac ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+
+# Get p value
+p.value <- res_bray$`Pr(>F)`[1]
+
+# PCA and plot
+d_ordered <- d_ordered[ , which(apply(d_ordered, 2, var) != 0)] # Remove zero-variance columns
+pca_results <- prcomp(d_ordered, center = TRUE, scale = TRUE)
+eigs <- pca_results$sdev^2
+eigs <- round(eigs/sum(eigs) * 100, digits = 1)
+pca_data <- as.data.frame(pca_results$x)
+pca_data$Sample <- rownames(pca_data)
+pca_merged <- inner_join(pca_data, meta, by = "Sample")
+data2 <- pca_merged
+axis1 = 1; axis2 = 2
+p <- ggplot(data2, aes(x = .data[[paste0("PC", axis1)]], y = .data[[paste0("PC", axis2)]])) +
+  geom_point(aes(color = Tox), size = 1.5) +
+  theme_pubr() +
+  labs(x = paste0("PC", axis1, " (", eigs[axis1], "% Variation)"),
+       y = paste0("PC", axis2, " (", eigs[axis2], "% Variation)"),
+       color = "Toxicity") + 
+  scale_color_manual(values = yes_palette) + 
+  annotate("text", x=-40, y=30, label = paste("Bray-Curtis~italic(p) == ", formatC(signif(p.value, digits=2), digits = 2, format="fg", flag="#")), parse = TRUE)
+
+# Save
+fn <- paste0(figdir, "PCAPathways_", time, "_", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, width = 4.5, height = 3)
+```
+
+## Every PERMANOVA pathway
+```{r}
+# Variables
+time = "Baseline" # revert to baseline for final
+outliers = c("NE_P24_T1", "NE_P33_T1", "NE_P47_T1") # outliers to filter, from "Sample"
+tox_cats = c("HFS_T2", "HFS_T1", "HFS_T3", 
+             "PSN_T1", "PSN_T2", "PSN_T3", 
+             "OM_T1", "OM_T2", "OM_T3", 
+             "DoseReduction_T2_v2", "DoseReduction_T3_v2", 
+             "DoseDelay_T2", "DoseDelay_T3",
+             "DoseDelayReduction_T2", "DoseDelayReduction_T3",
+             "Diarrhea_T1", "Diarrhea_T2", "Diarrhea_T3", 
+             "Fatigue_T1", "Fatigue_T2", "Fatigue_T3", 
+             "Nausea_T1", "Nausea_T2", "Nausea_T3",
+             "Constipation_T1", "Constipation_T2", "Constipation_T3",
+             "Fever_T2", "Fever_T3", # fever t1: only 1 contrast
+             "WeightLoss_T1", "WeightLoss_T2", "WeightLoss_T3",
+             # neutropenia only 1 contrast
+             # vomiting only 1 contrast
+             "Alopecia_T1", "Alopecia_T2", "Alopecia_T3",
+             "Hand.foot.syndrome..MR.", "Peripheral.sensory.neuropathy..MR.", "Diarrhea..combined...MR.")
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn)
+d <- d %>% filter(!(Pathway %in% c("UNMAPPED")))
+rownames(d) <- d$Pathway; d <- d %>% select(-Pathway)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time)
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(123)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+
+# Prepare for plotting
+res$Cycle <- case_when(grepl("T1", res$Toxicity) ~ "Baseline",
+                       grepl("T2", res$Toxicity) ~ "Cycle 3", 
+                       TRUE ~ "Post")
+res$R2 <- res$R2.CLR
+res$p.value <- res$p.CLR
+res$Tox <- gsub("_.*", "", res$Toxicity)
+
+# Rename tox categories
+res$Tox <- case_when(res$Tox == "PSN" ~ "Peripheral sensory neuropathy",
+                     res$Tox == "OM" ~ "Oral mucositis",
+                     res$Tox == "WeightLoss" ~ "Unintended weight loss",
+                     res$Tox == "HFS" ~ "Hand-foot syndrome",
+                     res$Tox == "DoseReduction" ~ "Dose reduction",
+                     res$Tox == "DoseDelay" ~ "Dose delay",
+                     TRUE ~ res$Tox)
+
+# Plot
+res_plot <- res %>% filter(Cycle == "Cycle 3")
+tox_order <- res_plot %>% group_by(Tox) %>% dplyr::summarise(max = max(R2)) %>% arrange(max) %>% select(Tox) %>% pull()
+res_plot$Tox <- factor(res_plot$Tox, levels = tox_order)
+res_plot$FDR <- p.adjust(res_plot$p.value, method = "BH") # FDR adjust
+
+p <- ggplot(res_plot, aes(x = R2, y = Tox)) + 
+  #facet_wrap(~Cycle) + 
+  geom_col(aes(fill = ifelse(FDR <= 0.2, "FDR < 0.2", "FDR > 0.2")), color = "black") + 
+  theme_pubr() + 
+  xlab(expression("Baseline microbiome pathway variance explained (R"^2*")")) + 
+  ylab("Cycle 3 Toxicity") + 
+  scale_fill_manual(values = tox_sig_palette) + 
+  theme(legend.title=element_blank()) + 
+  scale_x_continuous(breaks=c(0, 0.04, 0.08), labels=c("0", "0.04", "0.08")) + 
+  theme(legend.position = "right")
+
+# Save
+fn <- paste0(figdir, "PERMANOVAPathway.pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 6)
+```
+
+## Every PERMANOVA KO
+```{r}
+# Variables
+time = "Baseline"
+outliers = c("NE_P43_T1", "NE_P44_T1", "NE_P24_T1", "NE_P33_T1", "NE_P47_T1") # outliers to filter, from "Sample"
+tox_cats = c("HFS_T2", "HFS_T1", "HFS_T3", 
+             "PSN_T1", "PSN_T2", "PSN_T3", 
+             "OM_T1", "OM_T2", "OM_T3", 
+             "DoseReduction_T2_v2", "DoseReduction_T3_v2", 
+             "DoseDelay_T2", "DoseDelay_T3",
+             "DoseDelayReduction_T2", "DoseDelayReduction_T3",
+             "Diarrhea_T1", "Diarrhea_T2", "Diarrhea_T3", 
+             "Fatigue_T1", "Fatigue_T2", "Fatigue_T3", 
+             "Nausea_T1", "Nausea_T2", "Nausea_T3",
+             "Constipation_T1", "Constipation_T2", "Constipation_T3",
+             "Fever_T2", "Fever_T3", # fever t1: only 1 contrast
+             "WeightLoss_T1", "WeightLoss_T2", "WeightLoss_T3",
+             # neutropenia only 1 contrast
+             # vomiting only 1 contrast
+             "Alopecia_T1", "Alopecia_T2", "Alopecia_T3")
+
+# Read in and clr transform data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn)
+d <- d %>% filter(!(KO %in% c("UNMAPPED", "UNINTEGRATED")))
+rownames(d) <- d$KO; d <- d %>% select(-KO) %>% select(-X)
+geometric_means <- apply(d, 1, function(row) exp(mean(log(row[row > 0]))))
+pseudo_count = min(d[d > 0])/2
+clr_data <- log((d + pseudo_count) / geometric_means)
+clr_data <- na.omit(clr_data) # Omit NA values
+clr_data_t <- t(clr_data)
+clr_data_t_save <- clr_data_t[ , which(apply(clr_data_t, 2, var) != 0)] # Remove zero-variance columns
+d_t <- t(d)
+d_t_save <- d_t[ , which(apply(d_t, 2, var) != 0)]
+
+# Loop
+res = NULL
+for (tox_cat in tox_cats){
+  # Match metadata, data columns
+  meta <- metadata %>% filter(Time == time) %>% filter(Sample %in% rownames(clr_data_t_save) & Sample %in% rownames(d_t_save)) # only keep samples that we have sequencing data for
+  meta <- meta %>% filter(!(Sample %in% outliers))
+  meta$Tox <- meta[[tox_cat]]
+  meta <- meta %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555) # exclude samples with no tox info
+  meta$Tox <- case_when(meta$Tox > 0 ~ "Yes",
+                        TRUE ~ "No") # binarize
+  clr_data_t <- clr_data_t_save[meta$Sample,] # and vice versa for metadata matching
+  d_t <- d_t_save[meta$Sample,]
+  
+  # PERMANOVA
+  meta_perm <- meta %>% filter(Time == time)
+  row_order <- meta_perm %>% select(Sample) %>% pull(); clr_data_ordered <-clr_data_t[row_order,]; d_ordered <- d_t[row_order,] # arrange
+  if(sum(meta_perm$Sample == rownames(clr_data_ordered)) + sum(meta_perm$Sample == rownames(d_ordered)) != 2*length(meta_perm$Sample)){ # check that they match
+      print("PERMANVA order wrong!")
+  }
+  dist_clr <- suppressWarnings(vegdist(clr_data_ordered, method="euclidean", na.rm = TRUE)) # CLR-Euclidean
+  dist_bray <- vegdist(d_ordered, method="bray", na.rm = TRUE) # Bray
+  set.seed(123)
+  res_bray <- adonis2(dist_bray ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  res_clr <- adonis2(dist_clr ~ Tox, data = meta_perm, permutations=1000, by = NULL)
+  
+  # Get p value
+  p_bray <- res_bray$`Pr(>F)`[1]
+  R2_bray <- res_bray$R2[1]
+  p_CLR <- res_clr$`Pr(>F)`[1]
+  R2_CLR <- res_clr$R2[1]
+  new_row <- data.frame("p.bray" = p_bray, "R2.bray" = R2_bray, "p.CLR" = p_CLR, "R2.CLR" = R2_CLR, "Toxicity" = tox_cat)
+  if (length(res) == 0){res <- new_row}else{res <- rbind(res, new_row)}
+}
+
+# Prepare for plotting
+res$Cycle <- case_when(grepl("T1", res$Toxicity) ~ "Baseline",
+                       grepl("T2", res$Toxicity) ~ "Cycle 3", 
+                       TRUE ~ "Post")
+res$R2 <- res$R2.CLR
+res$p.value <- res$p.CLR
+res$Tox <- gsub("_.*", "", res$Toxicity)
+
+# Rename tox categories
+res$Tox <- case_when(res$Tox == "PSN" ~ "Peripheral sensory neuropathy",
+                     res$Tox == "OM" ~ "Oral mucositis",
+                     res$Tox == "WeightLoss" ~ "Unintended weight loss",
+                     res$Tox == "HFS" ~ "Hand-foot syndrome",
+                     res$Tox == "DoseReduction" ~ "Dose reduction",
+                     res$Tox == "DoseDelay" ~ "Dose delay",
+                     TRUE ~ res$Tox)
+
+# Plot
+res <- res %>% filter(Cycle == "Cycle 3")
+tox_order <- res %>% group_by(Tox) %>% dplyr::summarise(max = max(R2)) %>% arrange(max) %>% select(Tox) %>% pull()
+res$Tox <- factor(res$Tox, levels = tox_order)
+res$FDR <- p.adjust(res$p.value, method = "BH") # FDR adjust
+
+p <- ggplot(res, aes(x = R2, y = Tox)) + 
+  #facet_wrap(~Cycle) + 
+  geom_col(aes(fill = ifelse(FDR <= 0.2, "FDR < 0.2", "FDR > 0.2")), color = "black") + 
+  theme_pubr() + 
+  xlab(expression("Baseline microbiome pathway variance explained (R"^2*")")) + 
+  ylab("Cycle 3 Toxicity") + 
+  scale_fill_manual(values = tox_sig_palette) + 
+  theme(legend.title=element_blank()) + 
+  scale_x_continuous(breaks=c(0, 0.04, 0.08), labels=c("0", "0.04", "0.08")) + 
+  theme(legend.position = "right")
+
+# Save
+fn <- paste0(figdir, "PERMANOVAKO.pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 6)
+```
+
+## Tox pathways volcano
+```{r}
+tox_cat = "Alopecia_T2"
+time = "Baseline"
+tox_cat_label = "Alopecia" # name for plot
+
+# Read data
+fn <- paste0(tabledir, "ToxDE/Pathway_", time, "_", tox_cat, ".csv")
+v <- read.csv(fn)
+v$Value <- v$log2FC
+
+# Set the FDR cutoff value
+fdr_cutoff <- 0.2
+
+# Count number altered
+num <- v %>% filter(FDR < fdr_cutoff) %>% select(Gene) %>% count()
+num_up <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value > 0) %>% select(Gene) %>% count()
+x_up <- v %>% filter(Value > 0) %>% select(Value) %>% pull() %>% max()/2
+num_down <- v %>% filter(FDR < fdr_cutoff) %>% filter(Value < 0) %>% select(Gene) %>% count()
+x_down <- v %>% filter(Value < 0) %>% select(Value) %>% pull() %>% min()/2
+ymin <- v %>% select(FDR) %>% pull() %>% min(); yval <- -log10(ymin/4); ylim <- -log10(ymin/4)
+
+# Create a volcano plot
+v$Group <- tox_cat_label
+p <- ggplot(data = v, aes(x = Value, y = -log10(Pr...t..))) +
+  geom_point(aes(color = ifelse(FDR <= fdr_cutoff, ifelse(Value > 0, "Enriched", "Depleted"), "FDR > 0.2")), size = 1.5, alpha = 1) +
+  theme_pubr() +
+  labs(x = "Toxicity/no toxicity (log2FC)", y = expression("Significance (-log"[10]*"(p))"), color = "Significance") +
+  scale_color_manual(values = enriched_palette) +
+  theme(legend.position = "top") + 
+  facet_wrap(~Group) + 
+    theme(legend.title=element_blank())
+
+# Save
+fn <- paste0(figdir, "Volcano_", time, "_", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Plot hits
+```{r}
+# Load hits
+tox_cat = "PSN_T2" # name in df
+tox_cat_label = "PSN" # name for plot
+time = "Baseline"
+
+fn <- paste0(tabledir, "ToxDE/Pathway_Baseline_", tox_cat, ".csv") # read baseline timepoint
+v <- read.csv(fn) 
+
+fdr_cutoff <- 0.2
+hits <- v %>% filter(FDR < fdr_cutoff) %>% head(n = 10) %>% select(Gene) %>% pull()
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+t <- read.csv(fn) %>% filter(Pathway %in% hits)
+df <- reshape2::melt(t, id = "Pathway")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Toxicity
+df_plot$Tox <- df_plot[[tox_cat]]
+df_plot <- df_plot %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555)
+df_plot$Tox <- case_when(df_plot$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+# Plot
+df_plot$PathwayPlot <- gsub(".*\\: ", "", df_plot$Pathway)
+df_plot$PathwayPlot <- gsub(";", "", df_plot$PathwayPlot)
+df_plot$PathwayPlot <- gsub("&", "", df_plot$PathwayPlot)
+df_plot$PathwayPlot <- gsub("superpathway of ", "", df_plot$PathwayPlot)
+df_plot$Pathway <- factor(df_plot$Pathway, levels = hits)
+path_order <- df_plot %>% arrange(Pathway) %>% select(PathwayPlot) %>% unique() %>% pull()
+df_plot$PathwayPlot <- factor(df_plot$PathwayPlot, levels = rev(path_order))
+p <- ggplot(df_plot, aes(y = PathwayPlot, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Tox), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  #geom_point(aes(color = Tox), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10() + 
+  theme_pubr() + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(strip.text = element_text(face = "italic")) +  # Italicize
+  theme(legend.position = "top") + 
+  labs(fill = tox_cat_label) 
+
+# Save
+fn <- paste0(figdir, "Hits", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, height = 3, width = 8)
+
+# Different plot version
+t <- df_plot %>% select(all_of(c("PathwayPlot", "Abundance", "Tox", "Patient_ID")))
+t_log <- t
+t_log$Abundance <- log10(t_log$Abundance + 0.01)
+df_wide <- t_log %>% select(-Tox) %>% 
+  tidyr::pivot_wider(names_from = Patient_ID, values_from = Abundance) %>%
+  as.data.frame()
+rownames(df_wide) <- df_wide$PathwayPlot; df_wide <- df_wide %>% select(-PathwayPlot)
+df_wide[is.na(df_wide)] <- 0 # set NA to 0
+df_matrix <- as.matrix(df_wide)
+row_clusters <- hclust(dist(df_matrix, method = "euclidean"), method = "median")
+col_clusters <- hclust(dist(t(df_matrix), method = "euclidean"), method = "median")
+ordered_matrix <- df_matrix[rev(row_clusters$order), col_clusters$order]
+pt_order <- colnames(ordered_matrix); path_order <- rownames(ordered_matrix)
+df_long <- reshape2::melt(ordered_matrix)
+colnames(df_long) <- c("Pathway", "Patient_ID", "Abundance")
+tox = t[, c("Tox", "Patient_ID")] %>% distinct()
+df_long <- left_join(df_long, tox, by = "Patient_ID")
+df_long <- df_long %>% distinct()
+
+# Plot using ggplot2
+plotlimits = 1.5
+df_long$Pathway <- factor(df_long$Pathway, levels = rev(path_order))
+df_long$Patient_ID <- factor(df_long$Patient_ID, levels = pt_order)
+df_long$`Abundance (log10 RPKG)` <- df_long$Abundance
+p3 <- ggplot(df_long, aes(x = Patient_ID, y = Pathway, fill = `Abundance (log10 RPKG)`)) +
+  geom_tile() +
+  scale_fill_gradientn(
+    colors = c("white", "blue"),
+    values = scales::rescale(c(-2, plotlimits)),
+    limits = c(-2, plotlimits),
+    oob = scales::squish
+  ) +
+  xlab("Patient") + 
+  facet_grid(. ~ Tox, scales = "free", space = "free") + 
+  ylab("Pathway") + 
+  theme_pubr() +
+  theme(axis.text.x = element_blank()) 
+
+# Save
+fn <- paste0(figdir, "HitsHeatmap", time, tox_cat, ".pdf")
+ggsave(filename = fn, plot = p3, height = 3, width = 8)
+```
+
+## Plot difference vs time
+```{r}
+# Load hits
+tox_cat = "PSN_T2" # name in df
+tox_cat_label = "PSN" # name for plot
+time = "Baseline"
+
+fn <- paste0(tabledir, "ToxDE/Pathway_Baseline_", tox_cat, ".csv") # read baseline timepoint
+v <- read.csv(fn) 
+
+fdr_cutoff <- 0.2
+hits <- v %>% filter(FDR < fdr_cutoff) %>% head(n = 10) %>% select(Gene) %>% pull()
+
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+t <- read.csv(fn) %>% filter(Pathway %in% hits)
+df <- reshape2::melt(t, id = "Pathway")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+
+# Toxicity
+df_plot$Tox <- df_plot[[tox_cat]]
+df_plot <- df_plot %>% filter(!is.na(Tox)) %>% filter(Tox != 9999) %>% filter(Tox != 5555)
+df_plot$Tox <- case_when(df_plot$Tox > 0 ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+# Add all hit pathways together
+df_plot <- df_plot %>% group_by(Patient_ID, Time, Tox, Pathway) %>% 
+  dplyr::summarise(Abundance = sum(Abundance))
+
+# Plot
+df_plot$PathwayShort <- gsub("\\:.*", "", df_plot$Pathway)
+df_plot$PathwayShort <- gsub("-PWY", "", df_plot$PathwayShort)
+df_plot$Time[df_plot$Time == "Trough"] <- "Post"
+p <- ggplot(df_plot, aes(x = Tox, y = Abundance + 0.001, fill = Tox)) +
+  geom_boxplot(alpha = 0.5, outlier.size = -1) + 
+  facet_grid(Time ~ PathwayShort) + 
+  theme_pubr() + 
+  ylab("Abundance") + 
+  xlab("Toxicity (PSN at T2)") + 
+  scale_y_log10() + 
+  stat_compare_means(label.y = 2, method = "anova", aes(label = paste0("italic(p) ==", after_stat(p.format))), parse = TRUE) + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(legend.position = "none")
+
+# Save
+fn <- paste0(figdir, "HitsAllTimes", tox_cat, ".pdf")
+ggsave(filename = fn, plot = p, height = 6, width = 15)
+```
+
+## Mannan Stratified stacked bargraph 
+```{r}
+# Get hits
+fn <- paste0(tabledir, "ToxDE/Pathway_Baseline_Alopecia_T2.csv")
+v <- read.csv(fn)
+v$Value <- v$log2FC
+
+fdr_cutoff <- 0.2
+v <- v %>% filter(!(grepl("UNINTEGRATED|mitochondria", Gene))) # remove global pathways
+hits <- v %>% filter(FDR < fdr_cutoff) %>% filter(grepl("mannan", Gene)) %>% select(Gene) %>% pull()
+
+# Read in stratified abundance data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceStratified.csv")
+test <- read.csv(fn) 
+test$Organism <- gsub(".*\\|", "", test$Pathway)
+test$Pathway <- gsub("\\|.*", "", test$Pathway)
+test <- test %>% filter(Pathway %in% hits)
+test <- test %>% select(-Pathway)
+test <- reshape2::melt(test, by = "Organism")
+test$Time <- case_when(grepl("T1", test$variable) ~ "Baseline", 
+                       grepl("T2", test$variable) ~ "Cycle 3",
+                       TRUE ~ "Post")
+test$Organism = gsub("g__", "", test$Organism)
+test$Organism = gsub("\\.s__.*", "", test$Organism)
+test <- test %>% group_by(Organism, Time) %>% dplyr::summarise(sum = sum(value)) %>% arrange(sum)
+test$Organism <- case_when(test$Organism == "Ruminococcaceae_unclassified" ~ "Ruminococcaceae",
+                           test$Organism == "Coprococcus" ~ "Coprococcus",
+                           test$Organism == "Roseburia" ~ "Roseburia",
+                           test$Organism == "Clostridium" ~ "Clostridium",
+                           test$Organism == "unclassified" ~ "Unclassified",
+                           TRUE ~ "Other")
+
+# Plot
+order <- test %>% filter(Time == "Baseline") %>% arrange(sum) %>% select(Organism) %>% pull()
+test$Organism <- factor(test$Organism, levels = order)
+p <- ggplot(test %>% filter(Time == "Baseline"), aes(fill=Organism, x=sum/48, y=Organism)) + 
+  theme_pubr() + 
+  geom_bar(position="stack", stat="identity") + 
+  theme(axis.text.y = element_text(face = "italic")) +
+  theme(legend.title=element_blank()) + 
+  xlab("PWY-7456: beta-(14)-mannan degradation \n(mean RPKG at Baseline)") + 
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ylab("")
+  
+# Save
+fn <- paste0(figdir, "MannanStratified.pdf")
+ggsave(filename = fn, plot = p, width = 5, height = 2)
+```
+
+# Predict Tox
+```{r}
+figdir <- paste0(savedir, "PredictTox/")
+dir.create(figdir)
+```
+
+## Fatigue Boruta KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(Fatigue_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Fatigue_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Boruta
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_Fatigue_T2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_Fatigue_T2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_Fatigue_T2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Nausea Boruta KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(Nausea_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Nausea_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_Nausea_T2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_Nausea_T2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_Nausea_T2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Diarrhea Boruta KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(Diarrhea_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Diarrhea_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_DiarrheaT2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_DiarrheaT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_DiarrheaT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## HFS Boruta KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(HFS_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$HFS_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_HFST2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_HFST2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_HFST2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## PSN Boruta KO
+```{r}
+# Constants
+num_iterations <- 100 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(PSN_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$PSN_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_PSNT2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_PSNT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_PSNT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## PSN Boruta Pathway
+```{r}
+# Constants
+num_iterations <- 100 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(PSN_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$PSN_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$Pathway; d2 <- d2 %>% select(-Pathway)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_Pathway_PSNT2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_Pathway_PSNT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(Pathway %in% features)
+d2 <- d; rownames(d2) <- d2$Pathway; d2 <- d2 %>% select(-Pathway) 
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "Pathway_LOO_PSNT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## PSN Manual Pathway
+```{r}
+# Read data
+fn <- paste0(tabledir, "ToxDE/Pathway_Baseline_PSN_T2.csv")
+fdr_cutoff <- 0.2
+v <- read.csv(fn)
+features <- v %>% filter(FDR < fdr_cutoff) %>% head(n = 10) %>% select(Gene) %>% pull()
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Read in Pathway + filter to goi
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(Pathway %in% features)
+d2 <- d; rownames(d2) <- d2$Pathway; d2 <- d2 %>% select(-Pathway) 
+
+# Metadata
+meta <- metadata %>% filter(PSN_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$PSN_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "Pathway_LOO_PSNT2_Hits.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Dose delay/reduction T2 Boruta Pathway
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(DoseDelayReduction_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$DoseDelayReduction_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Bortua
+rerun_boruta = TRUE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$Pathway; d2 <- d2 %>% select(-Pathway)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_Pathway_DoseDelayReductionT2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_Pathway_DoseDelayReductionT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(Pathway %in% features)
+d2 <- d; rownames(d2) <- d2$Pathway; d2 <- d2 %>% select(-Pathway) 
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "Pathway_LOO_DoseDelayReductionT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Dose delay/reduction T2 Boruta KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(DoseDelayReduction_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$DoseDelayReduction_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Boruta
+rerun_boruta = FALSE
+if (rerun_boruta){
+# Read in pathways
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Reorder
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+keep <- names(colSums(dt > 0)[colSums(dt > 0) >= 5]) # require presence in at least 5 patients
+dt <- dt[,keep]
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- compositions::clr(dt)
+#dt <- log10(dt)
+dt <- as.data.frame(dt)
+
+# Boruta
+dt$Target <- as.factor(meta$Response)
+set.seed(1)
+boruta_output <- Boruta(Target ~ ., data = dt, doTrace = 2, maxRuns = 500)
+
+# save output
+feature_importances <- attStats(boruta_output)
+boruta_results <- data.frame(
+  Feature = rownames(feature_importances),
+  ImportanceMean = feature_importances$meanImp,
+  ImportanceMedian = feature_importances$medianImp,
+  Decision = feature_importances$decision)
+fn <- paste0(tabledir, "Models/Boruta_KO_DoseDelayReductionT2.csv")
+write.csv(boruta_results, file = fn, row.names = FALSE)
+}
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_DoseDelayReductionT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_DoseDelayReductionT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Dose delay/reduction T2 manual KO
+```{r}
+# Constants
+num_iterations <- 10 # Number of times to repeat the random forest process
+conf_level <- 0.95 # Confidence level for intervals
+
+# Metadata
+meta <- metadata %>% filter(DoseDelayReduction_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$DoseDelayReduction_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Set features
+features <- c("K17722", "K17723") #, "K01464", "K06016") # https://www.genome.jp/module/M00046+K17722 - pyrimidine KOs
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data <- df[, c(features, "Target")]
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_DoseDelayReductionT2.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Plot BORUTA KO DoseDelay
+```{r}
+# Set parameters
+suffix = "KO_DoseDelayReductionT2" # "KO_Tumor10" or "KO"
+res_cat = "DoseDelayReduction_T2" # name in metadata
+cut_val = 0 # cutoff
+time = "Baseline"
+
+# Load data, factor
+fn <- paste0(tabledir, "Models/Boruta_", suffix, ".csv")
+b <- read.csv(fn) %>% as.data.frame()
+b <- b %>% filter(Decision != "Rejected") 
+feature_order <- b %>% arrange(ImportanceMean) %>% select(Feature) %>% pull()
+b$KO <- factor(b$Feature, levels = feature_order)
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% feature_order)
+t <- t %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Response
+df_plot <- left_join(df_plot, b, by = "KO")
+df_plot$Response <- df_plot[[res_cat]]
+df_plot <- df_plot %>% filter(!is.na(Response)) %>% filter(Response != 9999) %>% filter(Response != 5555)
+df_plot$Toxicity <- case_when(df_plot$Response > cut_val ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+p1 <- ggplot(df_plot, aes(y = KO, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Toxicity), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  geom_point(aes(color = Toxicity), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10() + 
+  theme_pubr() + 
+  theme(legend.position = "right") + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(axis.ticks.y = element_blank()) +
+  rremove("ylab") +
+  scale_color_manual(values = yes_palette) 
+
+p2 <- ggplot(b, aes(y = KO, x = ImportanceMean)) + 
+  geom_col(width = 0.5, color = "black", fill = "yellow") + 
+  theme_pubr() + 
+  ylab("") + 
+  xlab("Mean importance (Boruta)")
+
+p <- ggarrange(p2, p1, widths = c(3, 3))
+
+# Save
+fn <- paste0(figdir, "Hits", suffix, ".pdf")
+ggsave(filename = fn, p, height = 3, width = 6)
+```
+
+## Plot BORUTA KO HFS
+```{r}
+# Set parameters
+suffix = "KO_HFST2" # "KO_Tumor10" or "KO"
+res_cat = "HFS_T2" # name in metadata
+cut_val = 0 # cutoff
+time = "Baseline"
+
+# Load data, factor
+fn <- paste0(tabledir, "Models/Boruta_", suffix, ".csv")
+b <- read.csv(fn) %>% as.data.frame()
+b <- b %>% filter(Decision != "Rejected") 
+feature_order <- b %>% arrange(ImportanceMean) %>% select(Feature) %>% pull()
+b$KO <- factor(b$Feature, levels = feature_order)
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% feature_order)
+t <- t %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Response
+df_plot <- left_join(df_plot, b, by = "KO")
+df_plot$Response <- df_plot[[res_cat]]
+df_plot <- df_plot %>% filter(!is.na(Response)) %>% filter(Response != 9999) %>% filter(Response != 5555)
+df_plot$Toxicity <- case_when(df_plot$Response > cut_val ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+p1 <- ggplot(df_plot, aes(y = KO, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Toxicity), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  geom_point(aes(color = Toxicity), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10(breaks = c(0.001, 0.1, 10)) + 
+  theme_pubr() + 
+  theme(legend.position = "right") + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(axis.ticks.y = element_blank()) +
+  rremove("ylab") +
+  scale_color_manual(values = yes_palette) 
+
+p2 <- ggplot(b, aes(y = KO, x = ImportanceMean)) + 
+  geom_col(width = 0.5, color = "black", fill = "yellow") + 
+  theme_pubr() + 
+  ylab("") + 
+  xlab("Mean importance (Boruta)")
+
+p <- ggarrange(p2, p1, widths = c(3, 3))
+
+# Save
+fn <- paste0(figdir, "Hits", suffix, ".pdf")
+ggsave(filename = fn, p, height = 3, width = 6)
+```
+
+## Plot BORUTA KO Diarrhea
+```{r}
+# Set parameters
+suffix = "KO_DiarrheaT2" # "KO_Tumor10" or "KO"
+res_cat = "Diarrhea_T2" # name in metadata
+cut_val = 0 # cutoff
+time = "Baseline"
+
+# Load data, factor
+fn <- paste0(tabledir, "Models/Boruta_", suffix, ".csv")
+b <- read.csv(fn) %>% as.data.frame()
+b <- b %>% filter(Decision != "Rejected") 
+feature_order <- b %>% arrange(ImportanceMean) %>% select(Feature) %>% pull()
+b$KO <- factor(b$Feature, levels = feature_order)
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% feature_order)
+t <- t %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Response
+df_plot <- left_join(df_plot, b, by = "KO")
+df_plot$Response <- df_plot[[res_cat]]
+df_plot <- df_plot %>% filter(!is.na(Response)) %>% filter(Response != 9999) %>% filter(Response != 5555)
+df_plot$Toxicity <- case_when(df_plot$Response > cut_val ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+p1 <- ggplot(df_plot, aes(y = KO, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Toxicity), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  geom_point(aes(color = Toxicity), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10() + 
+  theme_pubr() + 
+  theme(legend.position = "right") + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(axis.ticks.y = element_blank()) +
+  rremove("ylab") +
+  scale_color_manual(values = yes_palette) 
+
+p2 <- ggplot(b, aes(y = KO, x = ImportanceMean)) + 
+  geom_col(width = 0.5, color = "black", fill = "yellow") + 
+  theme_pubr() + 
+  ylab("") + 
+  xlab("Mean importance (Boruta)")
+
+p <- ggarrange(p2, p1, widths = c(3, 3))
+
+# Save
+fn <- paste0(figdir, "Hits", suffix, ".pdf")
+ggsave(filename = fn, p, height = 3, width = 6)
+```
+
+## Plot BORUTA KO PSN
+```{r}
+# Set parameters
+suffix = "KO_PSNT2" # "KO_XXXX"
+res_cat = "PSN_T2" # name in metadata
+cut_val = 0 # cutoff
+time = "Baseline"
+
+# Load data, factor
+fn <- paste0(tabledir, "Models/Boruta_", suffix, ".csv")
+b <- read.csv(fn) %>% as.data.frame()
+b <- b %>% filter(Decision != "Rejected") 
+feature_order <- b %>% arrange(ImportanceMean) %>% select(Feature) %>% pull()
+b$KO <- factor(b$Feature, levels = feature_order)
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+t <- read.csv(fn) %>% filter(KO %in% feature_order)
+t <- t %>% select(-X)
+df <- reshape2::melt(t, id = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Response
+df_plot <- left_join(df_plot, b, by = "KO")
+df_plot$Response <- df_plot[[res_cat]]
+df_plot <- df_plot %>% filter(!is.na(Response)) %>% filter(Response != 9999) %>% filter(Response != 5555)
+df_plot$Toxicity <- case_when(df_plot$Response > cut_val ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+p1 <- ggplot(df_plot, aes(y = KO, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Toxicity), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  geom_point(aes(color = Toxicity), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10() + 
+  theme_pubr() + 
+  theme(legend.position = "right") + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(axis.ticks.y = element_blank()) +
+  rremove("ylab") +
+  scale_color_manual(values = yes_palette) 
+
+p2 <- ggplot(b, aes(y = KO, x = ImportanceMean)) + 
+  geom_col(width = 0.5, color = "black", fill = "yellow") + 
+  theme_pubr() + 
+  ylab("") + 
+  xlab("Mean importance (Boruta)")
+
+p <- ggarrange(p2, p1, widths = c(3, 3))
+
+# Save
+fn <- paste0(figdir, "Hits", suffix, ".pdf")
+ggsave(filename = fn, p, height = 6, width = 6)
+```
+
+## Plot BORUTA Pathway PSN
+```{r}
+# Set parameters
+suffix = "Pathway_PSNT2" # "KO_XXXX" or "Pathway_XXX"
+res_cat = "PSN_T2" # name in metadata
+cut_val = 0 # cutoff
+time = "Baseline"
+
+# Load data, factor
+fn <- paste0(tabledir, "Models/Boruta_", suffix, ".csv")
+b <- read.csv(fn) %>% as.data.frame()
+b <- b %>% filter(Decision != "Rejected") 
+feature_order <- b %>% arrange(ImportanceMean) %>% select(Feature) %>% pull()
+b$Pathway <- factor(b$Feature, levels = feature_order)
+
+# Load data
+fn <- paste0(tabledir, "GeneTables/PathAbundanceUnstratified.csv")
+t <- read.csv(fn) %>% filter(Pathway %in% feature_order)
+t <- t 
+df <- reshape2::melt(t, id = "Pathway")
+colnames(df) <- c("Pathway", "Sample", "Abundance")
+df_plot <- left_join(df, metadata, by = "Sample")
+df_plot <- df_plot %>% filter(Time == time)
+
+# Response
+df_plot <- left_join(df_plot, b, by = "Pathway")
+df_plot$Response <- df_plot[[res_cat]]
+df_plot <- df_plot %>% filter(!is.na(Response)) %>% filter(Response != 9999) %>% filter(Response != 5555)
+df_plot$Toxicity <- case_when(df_plot$Response > cut_val ~ "Yes",
+                      TRUE ~ "No") # binarize
+
+p1 <- ggplot(df_plot, aes(y = Pathway, x = Abundance + min(Abundance[Abundance > 0]))) + 
+  geom_boxplot(aes(fill = Toxicity), alpha = 0.5, position = position_dodge(width = 0.75), outlier.size = -1) + 
+  geom_point(aes(color = Toxicity), position = position_dodge(width = 0.75)) + 
+  xlab("Abundance (RPKG)") + 
+  scale_x_log10() + 
+  theme_pubr() + 
+  theme(legend.position = "right") + 
+  ylab("") + 
+  scale_fill_manual(values = yes_palette) + 
+  theme(axis.text.y = element_blank()) + 
+  theme(axis.ticks.y = element_blank()) +
+  rremove("ylab") +
+  scale_color_manual(values = yes_palette) 
+
+p2 <- ggplot(b, aes(y = Pathway, x = ImportanceMean)) + 
+  geom_col(width = 0.5, color = "black", fill = "yellow") + 
+  theme_pubr() + 
+  ylab("") + 
+  xlab("Mean importance (Boruta)")
+
+p <- ggarrange(p2, p1, widths = c(3, 3))
+
+# Save
+fn <- paste0(figdir, "Hits", suffix, ".pdf")
+ggsave(filename = fn, p, height = 6, width = 6)
+```
+
+## Validate dose reductions with GO dataset
+```{r}
+num_iterations = 10
+conf_level = 0.95
+
+# Load GO data
+hits <- c("K03407", "K09769", "K04772", "K03615")
+reduc <- c("7", "11", "25", "20", "38", "1") # "reduc", "decreas" in REDCap
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+
+# Annotate with dose delay/reduction
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+df$Target <- case_when(df$Patient %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+data <- df
+
+# Function to run one iteration of the model
+run_model <- function(data, features) {
+  loo_control <- trainControl(method = "LOOCV",
+                              classProbs = TRUE,
+                              savePredictions = "final",
+                              summaryFunction = twoClassSummary, 
+                              sampling = "down")
+  
+  set.seed(sample.int(10000, 1)) # different seed for each run
+  rf_model <- train(Target ~ ., data = data, method = "rf", trControl = loo_control, metric = "ROC")
+  predictions <- rf_model$pred
+  pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+  auc <- performance(pred_roc, "auc")@y.values[[1]]
+  accuracy <- max(as.numeric(pred_roc@tn[[1]]) + as.numeric(pred_roc@tp[[1]]))/length(data$Target)
+
+  list(tpr = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]), fpr = pred_roc@fp[[1]]/max(pred_roc@fp[[1]]), auc = auc, accuracy = accuracy, 
+       predictions = pred_roc@predictions[[1]], labels = pred_roc@labels[[1]])
+}
+
+# Run model
+results <- replicate(num_iterations, run_model(data, features), simplify = FALSE)
+
+# Define a common set of thresholds
+common_thresholds <- seq(0, 1, by = 0.01)
+
+# Initialize lists to store interpolated TPR and FPR
+interp_tpr <- list()
+interp_fpr <- list()
+
+# Loop through the results to interpolate TPR and FPR
+for(i in 1:num_iterations) {
+  predictions <- as.numeric(results[[i]]$predictions) # Assuming these are probability scores
+  labels <- as.factor(results[[i]]$labels) # Make sure labels are factors
+  
+  # Interpolate TPR and FPR
+  interp_tpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$tpr, xout = common_thresholds)$y
+  interp_fpr[[i]] <- approx(x = results[[i]]$fpr, y = results[[i]]$fpr, xout = common_thresholds)$y
+}
+
+# Average the interpolated TPR and FPR across all iterations
+mean_tpr <- colMeans(do.call(rbind, interp_tpr))
+mean_fpr <- colMeans(do.call(rbind, interp_fpr))
+tpr_ci <- apply(do.call("rbind", interp_tpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+fpr_ci <- apply(do.call("rbind", interp_fpr), 2, function(x) quantile(x, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2)))
+
+# Extracting AUC and performance data
+aucs <- sapply(results, function(res) res$auc)
+accuracies <- sapply(results, function(res) res$accuracy)
+
+# Calculate mean and confidence intervals for AUC
+mean_auc <- mean(aucs)
+auc_ci <- quantile(aucs, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+mean_accuracy <- mean(accuracies)
+accuracy_ci <- quantile(accuracies, probs = c((1-conf_level)/2, 1 - (1-conf_level)/2))
+
+# Plotting ROC curve with confidence bands
+p <- ggplot() + 
+  geom_step(direction = "vh", aes(x = mean_fpr, y = mean_tpr), color = "black") +
+  geom_ribbon(aes(x = mean_fpr, ymin = tpr_ci[1,], ymax = tpr_ci[2,]), alpha = 0.2, fill = "blue") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = min(mean_tpr)), colour = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0, label = sprintf("AUC = %.2f [%.2f, %.2f]", mean_auc, auc_ci[1], auc_ci[2]), hjust = 1) + 
+  annotate("text", x = 1, y = 0.1, label = sprintf("Accuracy = %.2f [%.2f, %.2f]", mean_accuracy, accuracy_ci[1], accuracy_ci[2]), hjust = 1) +
+  theme_pubr()
+
+# Save
+fn <- paste0(figdir, "KO_LOO_DoseDelayReductionGO.pdf")
+ggsave(filename = fn, plot = p, width = 3, height = 3)
+```
+
+## Train NE, Test GO: DoseDelayReduction_T2
+```{r}
+## Read in NE
+meta <- metadata %>% filter(DoseDelayReduction_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$DoseDelayReduction_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_DoseDelayReductionT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data_NE <- df[, c(features, "Target")]
+
+## Load GO data
+hits <- features
+reduc <- c("7", "11", "25", "20", "38", "1") # "reduc", "decreas" in REDCap
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+minval = min(df[df > 0])
+df <- log10(df + minval)
+df$Target <- case_when(rownames(df) %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+df$Target <- as.factor(df$Target)
+data_GO <- df
+
+# Train + test
+data_train <- data_NE
+data_test <- data_GO
+set.seed(1)
+model <- train(Target ~ ., data = data_train, method = "rf", trControl = trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, sampling = "down", savePredictions = "final"), metric = "ROC", ntree = 500)
+train_prob <- predict(model, data_train, type = "prob")
+test_prob <- predict(model, data_test, type = "prob")
+
+# Training results 
+predictions <- model$pred
+pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+auc <- performance(pred_roc, "auc")@y.values[[1]]
+roc_train_df <- data.frame(
+  TPR = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]),
+  FPR = 1 - pred_roc@fp[[1]]/max(pred_roc@fp[[1]]),
+  Type = 'Train'
+)
+
+# Testing results 
+roc_test <- roc(data_test$Target, test_prob[,2]) # ensure you have the actual target variable in data_GO
+roc_test_df <- data.frame(
+  TPR = roc_test$sensitivities,
+  FPR = roc_test$specificities,
+  Type = 'Validation'
+)
+
+roc_data <- rbind(roc_train_df, roc_test_df) %>%
+  mutate(FPR = 1 - FPR) 
+
+roc_data_clean <- roc_data %>%
+  group_by(Type, FPR) %>%
+  summarize(TPR = max(TPR), .groups = 'drop') %>%
+  arrange(Type, FPR)
+
+ymin = min(roc_data_clean %>% filter(Type == "Train") %>% select(TPR)) # for fixing sgement
+roc_data_clean$Type <- factor(roc_data_clean$Type, levels = c("Train", "Validation"))
+p <- ggplot(roc_data_clean, aes(x = FPR, y = TPR, color = Type)) +
+  geom_step(direction = "vh") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = ymin), color = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0.1, label = sprintf("Train AUC = %.2f", auc), hjust = 1) + 
+  annotate("text", x = 1, y = 0, label = sprintf("Validation AUC = %.2f", roc_test$auc[1]), hjust = 1) +
+  theme_pubr() + 
+  scale_color_manual(values = c("black", "orange")) + 
+  labs(color = NULL) + 
+  theme(legend.position = "inside", legend.position.inside = c(0.75, 0.5))
+
+# Save
+fn <- paste0(figdir, "TrainNETestGO_DoseDelayReductionT2.pdf")
+ggsave(file = fn, plot = p, width = 3, height = 3)
+```
+
+## Train NE, Test GO: HFS to HFS
+```{r}
+## Read in NE
+meta <- metadata %>% filter(HFS_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$HFS_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_HFST2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data_NE <- df[, c(features, "Target")]
+
+## Load GO data
+hits <- features
+reduc <- c("25", "1", "2", "11", "14", "20", "21") # "hfs", "hand", "neuropathy", "erythrodys*" - ensure it's new during treatment
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+minval = min(df[df > 0])
+df <- log10(df + minval)
+df$Target <- case_when(rownames(df) %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+df$Target <- as.factor(df$Target)
+data_GO <- df
+
+# Train + test
+data_train <- data_NE
+data_test <- data_GO
+set.seed(1)
+model <- train(Target ~ ., data = data_train, method = "rf", trControl = trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, sampling = "down", savePredictions = "final"), metric = "ROC", ntree = 500)
+train_prob <- predict(model, data_train, type = "prob")
+test_prob <- predict(model, data_test, type = "prob")
+
+# Training results 
+predictions <- model$pred
+pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+auc <- performance(pred_roc, "auc")@y.values[[1]]
+roc_train_df <- data.frame(
+  TPR = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]),
+  FPR = 1 - pred_roc@fp[[1]]/max(pred_roc@fp[[1]]),
+  Type = 'Train'
+)
+
+# Testing results 
+roc_test <- roc(data_test$Target, test_prob[,2]) # ensure you have the actual target variable in data_GO
+roc_test_df <- data.frame(
+  TPR = roc_test$sensitivities,
+  FPR = roc_test$specificities,
+  Type = 'Validation'
+)
+
+roc_data <- rbind(roc_train_df, roc_test_df) %>%
+  mutate(FPR = 1 - FPR) 
+
+roc_data_clean <- roc_data %>%
+  group_by(Type, FPR) %>%
+  summarize(TPR = max(TPR), .groups = 'drop') %>%
+  arrange(Type, FPR)
+
+ymin = min(roc_data_clean %>% filter(Type == "Train") %>% select(TPR)) # for fixing sgement
+roc_data_clean$Type <- factor(roc_data_clean$Type, levels = c("Train", "Validation"))
+p <- ggplot(roc_data_clean, aes(x = FPR, y = TPR, color = Type)) +
+  geom_step(direction = "vh") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = ymin), color = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0.1, label = sprintf("Train AUC = %.2f", auc), hjust = 1) + 
+  annotate("text", x = 1, y = 0, label = sprintf("Validation AUC = %.2f", roc_test$auc[1]), hjust = 1) +
+  theme_pubr() + 
+  scale_color_manual(values = c("black", "orange")) + 
+  labs(color = NULL) + 
+  theme(legend.position = "inside", legend.position.inside = c(0.75, 0.5))
+
+# Save
+fn <- paste0(figdir, "TrainNETestGO_HFStoHFS.pdf")
+ggsave(file = fn, plot = p, width = 3, height = 3)
+```
+
+## Train NE, Test GO: Diarrhea to Diarrhea
+```{r}
+## Read in NE
+meta <- metadata %>% filter(Diarrhea_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Diarrhea_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_DiarrheaT2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data_NE <- df[, c(features, "Target")]
+
+## Load GO data
+hits <- features
+reduc <- c("1", "7", "20", "21", "54") # GI (diarrhea) - new during Tx
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+minval = min(df[df > 0])
+df <- log10(df + minval)
+df$Target <- case_when(rownames(df) %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+df$Target <- as.factor(df$Target)
+data_GO <- df
+
+# Train + test
+data_train <- data_NE
+data_test <- data_GO
+set.seed(1)
+model <- train(Target ~ ., data = data_train, method = "rf", trControl = trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, sampling = "down", savePredictions = "final"), metric = "ROC", ntree = 500)
+train_prob <- predict(model, data_train, type = "prob")
+test_prob <- predict(model, data_test, type = "prob")
+
+# Training results 
+predictions <- model$pred
+pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+auc <- performance(pred_roc, "auc")@y.values[[1]]
+roc_train_df <- data.frame(
+  TPR = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]),
+  FPR = 1 - pred_roc@fp[[1]]/max(pred_roc@fp[[1]]),
+  Type = 'Train'
+)
+
+# Testing results 
+roc_test <- roc(data_test$Target, test_prob[,2]) # ensure you have the actual target variable in data_GO
+roc_test_df <- data.frame(
+  TPR = roc_test$sensitivities,
+  FPR = roc_test$specificities,
+  Type = 'Validation'
+)
+
+roc_data <- rbind(roc_train_df, roc_test_df) %>%
+  mutate(FPR = 1 - FPR) 
+
+roc_data_clean <- roc_data %>%
+  group_by(Type, FPR) %>%
+  summarize(TPR = max(TPR), .groups = 'drop') %>%
+  arrange(Type, FPR)
+
+ymin = min(roc_data_clean %>% filter(Type == "Train") %>% select(TPR)) # for fixing sgement
+p <- ggplot(roc_data_clean, aes(x = FPR, y = TPR, color = Type)) +
+  geom_step(direction = "vh") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = ymin), color = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0.1, label = sprintf("Train AUC = %.2f", auc), hjust = 1) + 
+  annotate("text", x = 1, y = 0, label = sprintf("Test AUC = %.2f ", roc_test$auc[1]), hjust = 1) +
+  theme_pubr() + 
+  scale_color_manual(values = c("orange", "black")) + 
+  labs(color = NULL) + 
+  theme(legend.position = "inside", legend.position.inside = c(0.75, 0.4))
+
+# Save
+fn <- paste0(figdir, "TrainNETestGO_DiarrheatoDiarrhea.pdf")
+ggsave(file = fn, plot = p, width = 3, height = 3)
+```
+
+## Train NE, Test GO: Nausea to Nausea
+```{r}
+## Read in NE
+meta <- metadata %>% filter(Nausea_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Nausea_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_Nausea_T2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data_NE <- df[, c(features, "Target")]
+
+## Load GO data
+hits <- features
+reduc <- c("19", "33", "4", "54", "1") # Nausea
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+minval = min(df[df > 0])
+df <- log10(df + minval)
+df$Target <- case_when(rownames(df) %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+df$Target <- as.factor(df$Target)
+data_GO <- df
+
+# Train + test
+data_train <- data_NE
+data_test <- data_GO
+set.seed(1)
+model <- train(Target ~ ., data = data_train, method = "rf", trControl = trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, sampling = "down", savePredictions = "final"), metric = "ROC", ntree = 500)
+train_prob <- predict(model, data_train, type = "prob")
+test_prob <- predict(model, data_test, type = "prob")
+
+# Training results 
+predictions <- model$pred
+pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+auc <- performance(pred_roc, "auc")@y.values[[1]]
+roc_train_df <- data.frame(
+  TPR = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]),
+  FPR = 1 - pred_roc@fp[[1]]/max(pred_roc@fp[[1]]),
+  Type = 'Train'
+)
+
+# Testing results 
+roc_test <- roc(data_test$Target, test_prob[,2]) # ensure you have the actual target variable in data_GO
+roc_test_df <- data.frame(
+  TPR = roc_test$sensitivities,
+  FPR = roc_test$specificities,
+  Type = 'Validation'
+)
+
+roc_data <- rbind(roc_train_df, roc_test_df) %>%
+  mutate(FPR = 1 - FPR) 
+
+roc_data_clean <- roc_data %>%
+  group_by(Type, FPR) %>%
+  summarize(TPR = max(TPR), .groups = 'drop') %>%
+  arrange(Type, FPR)
+
+ymin = min(roc_data_clean %>% filter(Type == "Train") %>% select(TPR)) # for fixing sgement
+p <- ggplot(roc_data_clean, aes(x = FPR, y = TPR, color = Type)) +
+  geom_step(direction = "vh") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = ymin), color = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0.1, label = sprintf("Train AUC = %.2f", auc), hjust = 1) + 
+  annotate("text", x = 1, y = 0, label = sprintf("Test AUC = %.2f ", roc_test$auc[1]), hjust = 1) +
+  theme_pubr() + 
+  scale_color_manual(values = c("orange", "black")) + 
+  labs(color = NULL) + 
+  theme(legend.position = "inside", legend.position.inside = c(0.75, 0.4))
+
+# Save
+fn <- paste0(figdir, "TrainNETestGO_NauseatoNausea.pdf")
+ggsave(file = fn, plot = p, width = 3, height = 3)
+```
+
+## Train NE, Test GO: Fatigue
+```{r}
+## Read in NE
+meta <- metadata %>% filter(Fatigue_T2 %in% c(0, 1, 2, 3))
+meta$Response <- case_when(meta$Fatigue_T2 >= 1 ~ "Yes",
+                           TRUE ~ "No")
+meta <- meta %>% filter(Time == "Baseline")
+meta_save <- meta
+
+# Read in boruta output
+fn <- paste0(tabledir, "Models/Boruta_KO_Fatigue_T2.csv")
+genes <- read.csv(fn)
+features <- genes %>% filter(Decision != "Rejected") %>% select(Feature) %>% pull()
+
+# Read in KO + filter to goi
+fn <- paste0(tabledir, "GeneTables/KO.csv")
+d <- read.csv(fn) %>% as.data.frame()
+d <- d %>% filter(KO %in% features)
+d2 <- d; rownames(d2) <- d2$KO; d2 <- d2 %>% select(-KO) %>% select(-X)
+
+# Metadata
+meta <- meta_save
+meta <- meta %>% filter(Sample %in% colnames(d2)) 
+d2 <- d2[, meta$Sample] 
+
+# Transpose
+dt <- t(d2)
+dt <- dt + min(dt[dt > 0]) # add offset of minimal value
+dt <- log10(dt)
+dt <- as.data.frame(dt)
+df <- dt
+
+# Perform random forest 
+df$Target <- as.factor(meta$Response)
+data_NE <- df[, c(features, "Target")]
+
+## Load GO data
+hits <- features
+reduc <- c("23", "4", "11", "35", "45", "54") # Fatigue
+fn <- paste0(tabledir, "GeneTables/GOStudy_genefamilies_unstratified_nonzero0.csv")
+test <- read.csv(fn)
+test <- test %>% filter(KO %in% hits) %>% select(-X)
+df <- test %>% reshape2::melt(by = "KO")
+colnames(df) <- c("KO", "Sample", "Abundance")
+df$Patient <- gsub("GO_", "", df$Sample)
+df$Patient <- gsub("_.*", "", df$Patient)
+df$Patient <- gsub("Pt", "", df$Patient)
+df$Patient[df$Patient == "9b"] <- "9"
+df$Time <- gsub(".*_", "", df$Sample)
+df <- df %>% filter(Time %in% c("Baseline", "C1D1"))
+df <- df %>% dplyr::group_by(KO, Patient) %>% dplyr::summarise(Abundance = mean(Abundance)) %>% as.data.frame()
+df <- df %>% tidyr::pivot_wider(names_from = KO, values_from = Abundance) %>% as.data.frame()
+rownames(df) <- df$Patient; df <- df %>% select(-Patient)
+minval = min(df[df > 0])
+df <- log10(df + minval)
+df$Target <- case_when(rownames(df) %in% reduc ~ "Yes",
+                       TRUE ~ "No")
+df$Target <- as.factor(df$Target)
+data_GO <- df
+
+# Train + test
+data_train <- data_NE
+data_test <- data_GO
+set.seed(1)
+model <- train(Target ~ ., data = data_train, method = "rf", trControl = trainControl(method = "LOOCV", classProbs = TRUE, summaryFunction = twoClassSummary, sampling = "down", savePredictions = "final"), metric = "ROC", ntree = 500)
+train_prob <- predict(model, data_train, type = "prob")
+test_prob <- predict(model, data_test, type = "prob")
+
+# Training results 
+predictions <- model$pred
+pred_roc <- ROCR::prediction(predictions$Yes, predictions$obs)
+auc <- performance(pred_roc, "auc")@y.values[[1]]
+roc_train_df <- data.frame(
+  TPR = pred_roc@tp[[1]]/max(pred_roc@tp[[1]]),
+  FPR = 1 - pred_roc@fp[[1]]/max(pred_roc@fp[[1]]),
+  Type = 'Train'
+)
+
+# Testing results 
+roc_test <- roc(data_test$Target, test_prob[,2]) # ensure you have the actual target variable in data_GO
+roc_test_df <- data.frame(
+  TPR = roc_test$sensitivities,
+  FPR = roc_test$specificities,
+  Type = 'Validation'
+)
+
+roc_data <- rbind(roc_train_df, roc_test_df) %>%
+  mutate(FPR = 1 - FPR) 
+
+roc_data_clean <- roc_data %>%
+  group_by(Type, FPR) %>%
+  summarize(TPR = max(TPR), .groups = 'drop') %>%
+  arrange(Type, FPR)
+
+ymin = min(roc_data_clean %>% filter(Type == "Train") %>% select(TPR)) # for fixing sgement
+p <- ggplot(roc_data_clean, aes(x = FPR, y = TPR, color = Type)) +
+  geom_step(direction = "vh") +
+  geom_segment(aes(x = 0, y = 0, xend = 0, yend = ymin), color = "black") +
+  xlab("False Positive Rate (FPR)") + 
+  ylab("True Positive Rate (TPR)") +
+  annotate("text", x = 1, y = 0.1, label = sprintf("Train AUC = %.2f", auc), hjust = 1) + 
+  annotate("text", x = 1, y = 0, label = sprintf("Test AUC = %.2f ", roc_test$auc[1]), hjust = 1) +
+  theme_pubr() + 
+  scale_color_manual(values = c("orange", "black")) + 
+  labs(color = NULL) + 
+  theme(legend.position = "inside", legend.position.inside = c(0.75, 0.4))
+
+# Save
+fn <- paste0(figdir, "TrainNETestGO_Fatigue.pdf")
+ggsave(file = fn, plot = p, width = 3, height = 3)
+```
+
